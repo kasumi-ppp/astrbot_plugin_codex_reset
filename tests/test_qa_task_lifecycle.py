@@ -20,6 +20,7 @@ import asyncio
 import importlib
 import sys
 import types
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -850,3 +851,60 @@ def test_legacy_shutdown_marker_without_identity_is_not_trusted(tmp_path, monkey
         return readonly
 
     assert run(scenario()) is True, "无身份的退出标记不得作为接管依据"
+
+def test_release_runtime_retries_close_after_failure(tmp_path, monkeypatch):
+    """P3-1：`close()` 失败时**不得**把 `_released` 置位，否则连接再也没人关。
+
+    若关闭失败还标记「已释放」，第二次 `terminate` 会直接 return，aiosqlite 的非 daemon
+    线程只能等解释器退出时回收，可能拖住进程退出，且状态与实际不符。
+    """
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        plugin = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await plugin.initialize()
+        calls = {"n": 0}
+        original = plugin.repo.close
+
+        async def flaky_close() -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("close 炸了")
+            await original()
+
+        monkeypatch.setattr(plugin.repo, "close", flaky_close)
+        await plugin.terminate()
+        after_first = plugin._released  # noqa: SLF001
+        await plugin.terminate()  # 第二次必须重试关闭
+        return after_first, plugin._released, calls["n"]  # noqa: SLF001
+
+    after_first, after_second, calls = run(scenario())
+
+    assert after_first is False, "关闭失败不得标记为已释放"
+    assert after_second is True, "第二次调用应真正关闭并置位"
+    assert calls == 2, "关闭失败后必须允许重试"
+
+
+def test_heartbeat_is_throttled_to_avoid_wal_amplification(tmp_path, monkeypatch):
+    """P3-3：心跳写入被节流（配置监听每 5s 一拍，不能每拍都写一次 meta）。"""
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        plugin = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await plugin.initialize()
+        baseline = await plugin.repo.meta_get("runtime:heartbeat_at")
+        await plugin._touch_heartbeat()  # noqa: SLF001 - 紧接着再调：应被节流
+        throttled = await plugin.repo.meta_get("runtime:heartbeat_at")
+        plugin._last_heartbeat_at = plugin.clock.utcnow() - timedelta(  # noqa: SLF001
+            seconds=main.HEARTBEAT_INTERVAL_SECONDS + 1
+        )
+        await plugin._touch_heartbeat()  # noqa: SLF001 - 超过间隔：应写入
+        refreshed = await plugin.repo.meta_get("runtime:heartbeat_at")
+        await plugin.terminate()
+        return baseline, throttled, refreshed
+
+    baseline, throttled, refreshed = run(scenario())
+
+    assert baseline is not None
+    assert throttled == baseline, "间隔内重复调用不得写库"
+    assert refreshed != baseline, "超过间隔后必须刷新心跳"

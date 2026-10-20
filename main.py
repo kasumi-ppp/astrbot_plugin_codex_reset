@@ -76,6 +76,9 @@ DB_FILENAME = "codex_reset.db"
 AUDIT_DIRNAME = "audit"
 POLL_TICK_SECONDS = 5.0
 
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+"""常驻心跳的最小写入间隔（判据阈值 `2×spacing` 最少 120s，30s 足够且不制造 WAL 写放大）。"""
+
 RUNTIME_OWNER_KEY = "runtime:owner"
 """当前持锁实例标识（`pid:8位随机`，架构 §A.4 软单实例）。"""
 
@@ -211,6 +214,8 @@ class CodexResetRadar(Star):
         self._owner: str | None = None
         self._owner_candidate: str | None = None
         self._released = False
+        self._marker_written = False
+        self._last_heartbeat_at: datetime | None = None
         self._stop_error = False
         self._poll_task: asyncio.Task[Any] | None = None
         self._config_digest: str | None = None
@@ -422,24 +427,30 @@ class CodexResetRadar(Star):
 
         记录值带 owner 身份：只有「记录里的 owner 自己写的退出标记」才允许下一次启动
         据此接管，避免只读实例的退出把持锁实例「洗白」成已退出（P1-04）。
+
+        `_released` **只在 `close()` 真正成功后才置位**：若关闭失败还标记成「已释放」，
+        第二次 `terminate` 会直接 return，aiosqlite 连接（非 daemon 线程）就只能等到解释器
+        退出时才回收，可能拖住进程退出；标记本身用 `_marker_written` 单独去重，避免重复告警。
         """
         repo = self._repo
-        if repo is None or self._released:  # pragma: no cover - 初始化失败 / 重复调用
+        if repo is None or self._released:  # pragma: no cover - 初始化失败 / 已释放
             return
         identity = self._owner or self._owner_candidate
         if identity is None:  # pragma: no cover - 理论上不可达
             identity = f"{os.getpid()}:unknown"
-        try:
-            await repo.meta_set(
-                RUNTIME_SHUTDOWN_KEY, f"{identity}|{self.clock.utcnow().isoformat()}"
-            )
-        except Exception:  # pragma: no cover - 退出路径不因写标记失败而中断
-            logger.warning("[codex-reset][main] 写入 shutdown 标记失败", exc_info=True)
+        if not self._marker_written:
+            try:
+                await repo.meta_set(
+                    RUNTIME_SHUTDOWN_KEY, f"{identity}|{self.clock.utcnow().isoformat()}"
+                )
+                self._marker_written = True
+            except Exception:  # pragma: no cover - 退出路径不因写标记失败而中断
+                logger.warning("[codex-reset][main] 写入 shutdown 标记失败", exc_info=True)
         try:
             await repo.close()
-            self._released = True
-        except Exception:  # pragma: no cover
+        except Exception:  # pragma: no cover - 允许下一次 terminate 重试关闭
             logger.warning("[codex-reset][main] repo.close 异常", exc_info=True)
+        else:
             self._released = True
 
     # ------------------------------------------------------------------
@@ -548,10 +559,12 @@ class CodexResetRadar(Star):
                         self._readonly = True
                         return
             self._owner = owner
+            now_text = self.clock.utcnow().isoformat()
             await tx.set(RUNTIME_OWNER_KEY, owner)
             # 取得所有权时**同事务**写心跳：否则「owner 存在但心跳为空」会让下一个
             # 实例落进 fail-open 分支（无心跳 → 判定不了 → 直接抢锁），两实例同时可写（P2-12）
-            await tx.set(RUNTIME_HEARTBEAT_KEY, self.clock.utcnow().isoformat())
+            await tx.set(RUNTIME_HEARTBEAT_KEY, now_text)
+            self._last_heartbeat_at = self.clock.utcnow()
             # 清掉上一次的退出标记，避免下一次启动把它当成「干净退出」的依据
             await tx.delete(RUNTIME_SHUTDOWN_KEY)
 
@@ -599,10 +612,20 @@ class CodexResetRadar(Star):
 
         只由**持锁实例**写：只读实例写心跳等于对外宣称自己是 owner，会让真正的
         owner 在下一次判定时把自己看成「另一个实例」的竞争者（P1-04 的镜像问题）。
+
+        写入频率被 `HEARTBEAT_INTERVAL_SECONDS` 节流（判据阈值是 `2×spacing`，最少 120s）：
+        配置监听每 5s 一拍，若每拍都 `BEGIN IMMEDIATE` 写一次 meta，长期空转会产生无谓的
+        WAL 写放大（P3-3）。
         """
         if self._readonly or self._owner is None or self._repo is None or self._released:
             return
-        await self._repo.meta_set(RUNTIME_HEARTBEAT_KEY, self.clock.utcnow().isoformat())
+        now = self.clock.utcnow()
+        if self._last_heartbeat_at is not None:
+            elapsed = (now - self._last_heartbeat_at).total_seconds()
+            if elapsed < HEARTBEAT_INTERVAL_SECONDS:
+                return
+        await self._repo.meta_set(RUNTIME_HEARTBEAT_KEY, now.isoformat())
+        self._last_heartbeat_at = now
 
     async def _reload_config_if_changed(self) -> None:
         """读文件 → 比对摘要 → 解析 → 应用（间隔 / 卡片 / 采集任务开关）。"""
