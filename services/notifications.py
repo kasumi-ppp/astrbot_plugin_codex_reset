@@ -586,8 +586,18 @@ class DeliveryWorker:
             await self._repo.mark_skipped(task, now=now, reason="category_disabled")
             return False
 
-        tz = self._tz_provider()
-        text = self._render(task, tz=tz, settings=plugin)
+        if task.kind == "catchup":
+            events = [
+                event for event in _events_from_payload(task.payload)
+                if self._category_enabled(event.kind, settings)
+            ]
+            if not events:
+                await self._repo.mark_skipped(task, now=now, reason="category_disabled")
+                return False
+            text = render_catchup_summary(events, tz=self._tz_provider(), settings=plugin)
+        else:
+            text = self._render(task, tz=self._tz_provider(), settings=plugin)
+
         if text is None:
             # 未知 kind / payload 残缺：重试不会变好，直接终态 failed
             await self._repo.mark_failed(

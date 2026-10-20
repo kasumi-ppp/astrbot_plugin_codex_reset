@@ -29,22 +29,40 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import At
 from astrbot.api.star import Context, Star, register
 
-from services.classifier import EventClassifier, ForecastEvaluator
-from services.client import SourceClient
-from services.clock import RealClock
-from services.commands import CommandService
-from services.config import (
-    build_plugin_settings,
-    override_from_card,
-    override_to_card,
-    parse_timezone,
-)
-from services.errors import SchemaTooNewError
-from services.models import CommandRequest, PluginSettings, SubscriptionRow
-from services.notifications import DeliveryWorker
-from services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
-from services.repository import Repository
-from services.scheduler import SourceScheduler
+if __package__:
+    from .services.classifier import EventClassifier, ForecastEvaluator
+    from .services.client import SourceClient
+    from .services.clock import RealClock
+    from .services.commands import CommandService
+    from .services.config import (
+        build_plugin_settings,
+        override_from_card,
+        override_to_card,
+        parse_timezone,
+    )
+    from .services.errors import SchemaTooNewError
+    from .services.models import CommandRequest, PluginSettings, SubscriptionRow
+    from .services.notifications import DeliveryWorker
+    from .services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
+    from .services.repository import Repository
+    from .services.scheduler import SourceScheduler
+else:  # 独立测试入口；AstrBot 按包加载时必须使用上面的相对导入。
+    from services.classifier import EventClassifier, ForecastEvaluator
+    from services.client import SourceClient
+    from services.clock import RealClock
+    from services.commands import CommandService
+    from services.config import (
+        build_plugin_settings,
+        override_from_card,
+        override_to_card,
+        parse_timezone,
+    )
+    from services.errors import SchemaTooNewError
+    from services.models import CommandRequest, PluginSettings, SubscriptionRow
+    from services.notifications import DeliveryWorker
+    from services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
+    from services.repository import Repository
+    from services.scheduler import SourceScheduler
 
 try:  # AstrBot ≥ 4.5 提供数据目录工具；旧版本回落到工作目录
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -311,7 +329,7 @@ class CodexResetRadar(Star):
 
         self._client = SourceClient(clock=self.clock)
         self._scheduler = SourceScheduler(
-            spacing_seconds=self._plugin_settings.request_spacing_seconds, clock=self.clock
+            spacing_seconds=self._plugin_settings.request_spacing_seconds, clock=self.clock, jitter=5.0
         )
         classifier = EventClassifier(clock=self.clock)
         evaluator = ForecastEvaluator(

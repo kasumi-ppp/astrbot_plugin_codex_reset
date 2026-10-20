@@ -47,7 +47,7 @@ class SourceScheduler:
         self._failures = 0
         self._next_due_at: datetime | None = None
         self._last_request_started_at: datetime | None = None
-        self._rng = random.Random(20261020)
+        self._rng = random.Random()
 
     # ------------------------------------------------------------------
     # 只读属性
@@ -129,11 +129,15 @@ class SourceScheduler:
 
         self._failures += 1
         delay = float(self.backoff_seconds(self._failures))
-        if error_code == ErrorCode.HTTP_429 and retry_after:
-            # 429 优先尊重服务端 Retry-After（上限与退避上限一致，防止无限期停摆）
-            delay = min(max(float(retry_after), float(MIN_BACKOFF_SECONDS)), float(MAX_BACKOFF_SECONDS))
+        is_rate_limited = error_code == ErrorCode.HTTP_429 and retry_after is not None
+        if is_rate_limited:
+            # 429 必须遵守服务端 Retry-After；仅将过短值抬到全局最小间隔。
+            delay = max(float(retry_after), float(MIN_BACKOFF_SECONDS))
         if self._jitter > 0:
             delay += self._rng.uniform(0.0, self._jitter)
+        if not is_rate_limited:
+            # 普通错误退避（含抖动）仍受 15 分钟上限约束。
+            delay = min(delay, float(MAX_BACKOFF_SECONDS))
         self._next_due_at = now + timedelta(seconds=delay)
         logger.warning(
             "[codex-reset][scheduler] endpoint=%s failed error=%s failures=%s backoff_s=%.1f",

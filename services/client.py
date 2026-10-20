@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -27,7 +28,6 @@ DEFAULT_BASE_URL = SITE_BASE_URL
 DEFAULT_TIMEOUT_S = 15.0
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_RETRY_AFTER_S = 60
-MAX_RETRY_AFTER_S = 3600
 
 
 def _header(headers: Any, name: str) -> str | None:
@@ -56,8 +56,8 @@ def parse_retry_after(value: Any) -> int:
     if not text:
         return DEFAULT_RETRY_AFTER_S
     try:
-        seconds = int(float(text))
-    except ValueError:
+        numeric_seconds = float(text)
+    except (OverflowError, ValueError):
         try:
             when = parsedate_to_datetime(text)
         except (TypeError, ValueError, IndexError):
@@ -67,10 +67,14 @@ def parse_retry_after(value: Any) -> int:
         if when.tzinfo is None:
             when = when.replace(tzinfo=UTC)
         delta = (when - datetime.now(UTC)).total_seconds()
-        seconds = int(delta)
+        seconds = math.ceil(delta)
+    else:
+        if not math.isfinite(numeric_seconds):
+            return DEFAULT_RETRY_AFTER_S
+        seconds = math.ceil(numeric_seconds)
     if seconds <= 0:
         return DEFAULT_RETRY_AFTER_S
-    return min(seconds, MAX_RETRY_AFTER_S)
+    return seconds
 
 
 class SourceClient:

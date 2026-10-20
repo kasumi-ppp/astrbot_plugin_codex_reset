@@ -49,7 +49,7 @@
 
 | ID | 操作步骤 | 期望结果 | 状态 |
 | --- | --- | --- | --- |
-| AC-15 | ① 管理员 `/cr subscribe` 订阅本群；② 换一个**非管理员**群成员执行 `/cr subscribe`、`/cr unsub`、`/cr set forecast off` | ② 三条指令均回复固定文案 `仅管理员可执行该指令。使用 /cr help 查看权限说明。`，且群配置无任何变化；③ 该成员执行 `/cr status`、`/cr forecast` 仍正常返回 | 待验收 |
+| AC-15 | ① 管理员 `/cr subscribe` 订阅本群；② 换一个**非管理员**群成员执行 `/cr subscribe`、`/cr unsubscribe`、`/cr set forecast off` | ② 三条指令均回复固定文案 `仅管理员可执行该指令。使用 /cr help 查看权限说明。`，且群配置无任何变化；③ 该成员执行 `/cr status`、`/cr forecast` 仍正常返回 | 待验收 |
 | AC-16 | ① 管理员 `/cr subscribe` 后确认能收到通知；② 管理员 `/cr unsubscribe` | ② 回复退订成功文案；③ 之后不再收到任何自动通知；④ WebUI「群订阅覆盖」卡片中该群条目消失 | 待验收 |
 | AC-17 | ① `/cr subscribe` 并等到至少一条真实通知；② `docker restart` AstrBot（保留 `plugin_data` 卷）；③ 重启后观察 30 分钟 | 订阅关系与已有投递记录保留；重启后**不**重发历史事件；启动日志出现 `bootstrap` / `requeue` 相关记录；`uncertain` 状态的投递被标记而非静默丢弃 | 待验收 |
 | AC-22 | 管理员在**未订阅**群执行 `/cr test` | 仅当前会话（当前群）收到带「测试」标记的单条消息；`deliveries` 表无新增行；真实事件状态不变；随后 60s 内再次执行被限频拒绝 | 待验收 |

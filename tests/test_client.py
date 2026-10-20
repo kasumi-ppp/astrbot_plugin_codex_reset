@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from email.utils import format_datetime
 
 import aiohttp
 import pytest
@@ -213,8 +214,32 @@ def test_close_only_closes_own_session() -> None:
 
 def test_parse_retry_after_supports_http_date_and_garbage() -> None:
     assert parse_retry_after("120") == 120
-    assert parse_retry_after("120.9") == 120
+    assert parse_retry_after("120.1") == 121
     assert parse_retry_after(None) == 60
     assert parse_retry_after("garbage") == 60
     assert parse_retry_after("-5") == 60
     assert parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 60  # 过去时间 → 默认
+
+
+def test_parse_retry_after_preserves_long_wait_and_rejects_non_finite_values() -> None:
+    assert parse_retry_after("3600") == 3600
+    assert parse_retry_after("inf") == 60
+    assert parse_retry_after("nan") == 60
+    assert parse_retry_after("1e309") == 60
+
+
+def test_parse_retry_after_http_date_uses_ceil(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.client as client_module
+
+    fixed_now = datetime(2026, 1, 1, 0, 0, 0, 500_000, tzinfo=UTC)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(client_module, "datetime", FixedDateTime)
+    short_header = format_datetime(datetime(2026, 1, 1, 0, 2, 1, tzinfo=UTC), usegmt=True)
+    long_header = format_datetime(datetime(2026, 1, 1, 1, 0, 1, tzinfo=UTC), usegmt=True)
+    assert parse_retry_after(short_header) == 121
+    assert parse_retry_after(long_header) == 3601

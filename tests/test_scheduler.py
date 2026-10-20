@@ -100,7 +100,7 @@ def test_success_resets_failure_counter_and_backoff() -> None:
     assert (due - now).total_seconds() == 120  # 重新从 2 分钟起
 
 
-def test_429_uses_retry_after_but_stays_bounded() -> None:
+def test_429_honors_long_retry_after_and_enforces_minimum_spacing() -> None:
     clock = FakeClock(utc())
     scheduler = _scheduler(clock, jitter=0.0)
     now = clock.utcnow()
@@ -113,7 +113,20 @@ def test_429_uses_retry_after_but_stays_bounded() -> None:
     assert (due - now).total_seconds() == 60  # 过小的 Retry-After 抬到最小退避
 
     due = scheduler.record_result("forecast", ErrorCode.HTTP_429, now, retry_after=99999)
-    assert (due - now).total_seconds() == 900  # 上限 900s
+    assert (due - now).total_seconds() == 99999  # 429 必须服从服务端等待时间
+
+
+def test_non_429_failure_backoff_remains_capped_at_900_seconds() -> None:
+    clock = FakeClock(utc())
+    scheduler = _scheduler(clock, jitter=5.0)
+    now = clock.utcnow()
+    scheduler.next_endpoint(now)
+
+    due = scheduler.record_result("forecast", ErrorCode.NETWORK, now)
+    for _ in range(4):
+        due = scheduler.record_result("forecast", ErrorCode.NETWORK, now)
+
+    assert (due - now).total_seconds() == 900
 
 
 def test_not_modified_counts_as_success() -> None:
