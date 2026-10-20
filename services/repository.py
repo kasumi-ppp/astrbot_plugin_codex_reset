@@ -165,6 +165,7 @@ class Repository:
         self._audit_dir = Path(audit_dir) if audit_dir is not None else self._db_path.parent / "audit"
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        self._tx_owner: asyncio.Task[Any] | None = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -260,15 +261,27 @@ class Repository:
 
     @asynccontextmanager
     async def _tx(self) -> AsyncIterator[aiosqlite.Connection]:
-        """单写锁 + `BEGIN IMMEDIATE` 事务上下文。"""
+        """单写锁 + `BEGIN IMMEDIATE` 事务上下文。
+
+        事务内**禁止**再开事务：`asyncio.Lock` 不可重入，嵌套会永久自锁且没有任何报错。
+        这里用 task 身份做快速失败——只拦「同一 task 重入」，其它 task 仍正常排队等锁。
+        """
+        current = asyncio.current_task()
+        if current is not None and self._tx_owner is current:
+            raise RuntimeError(
+                "禁止在 atomic_meta() 事务内嵌套 meta 写（asyncio.Lock 不可重入，会永久自锁）"
+            )
         conn = self._connection()
         async with self._write_lock:
             await conn.execute("BEGIN IMMEDIATE")
+            self._tx_owner = current
             try:
                 yield conn
             except BaseException:
                 await conn.rollback()
                 raise
+            finally:
+                self._tx_owner = None
             await conn.commit()
 
     # ------------------------------------------------------------------
@@ -765,7 +778,8 @@ class Repository:
         if exclude_corrections:
             clauses.append("state_version NOT LIKE 'downgraded%'")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(int(limit))
+        # SQLite 的 `LIMIT -1` 等于「无上限」，负数必须收敛为 0（否则 history 会绕过上限）
+        params.append(max(0, int(limit)))
         cursor = await conn.execute(
             f"SELECT * FROM logical_events{where} ORDER BY occurred_at DESC, logical_id LIMIT ?",
             tuple(params),

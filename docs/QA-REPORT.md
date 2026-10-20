@@ -10,7 +10,7 @@
 
 ## 0. 修复回归（第二轮）
 
-> 执行：主理人指派工程师修复 ｜ 范围：P1-01/02、P2-01~08、附加 A/B/C ｜ 门禁：`pytest tests -q` = **421 passed / 0 xfailed**（三轮收尾后）、`ruff check services tests main.py` = All checks passed、`grep -rn "import astrbot" services/` 无输出
+> 执行：主理人指派工程师修复 ｜ 范围：P1-01/02、P2-01~08、附加 A/B/C ｜ 门禁：`pytest tests -q` = **426 passed / 0 xfailed**（四轮收尾后）、`ruff check services tests main.py` = All checks passed、`grep -rn "import astrbot" services/` 无输出
 
 4 处 `@pytest.mark.xfail` 标记**全部删除**（P2-01、P2-02、P2-03 各 1 处，P1-02 1 处），转为普通回归用例。下表逐条对应「修复位置 → 守护测试 → 状态」。
 
@@ -30,26 +30,11 @@
 | **B** | `services/scheduler.py:153-167`（`set_spacing`，并重算正常槽位 `_next_due_at`，退避中不动）；`services/pipeline.py:360-366`（每次判定按当前全局配置重建 `ForecastEvaluator`）；`main.py:476-545`（`_config_watch_loop` / `_reload_config_if_changed` / `_sync_poll_task`，sha1 摘要避免自写回环） | `test_scheduler.py::test_set_spacing_takes_effect_on_next_slot`、`::test_set_spacing_clamps_to_at_least_one_second`、`test_pipeline.py::test_evaluate_all_uses_current_global_settings`（构造时注入 `confirm_samples=99`，仍按 plugin 的 2 判定；热改 1 后立即生效） | `已修复` |
 | **C** | `main.py:250-253`、`:524-528`（`admin_only_subscription=false` 启动 warning）；`services/parser.py:541`（`feed.stale` 缺失）、`:578`（`feed.events` 缺失）同口径告警 | `test_schema.py` 源码断言 + `test_parser.py` / `test_qa_degradation.py` 既有告警断言 | `已修复` |
 
-**回归结论**：**421 项全绿、0 xfailed**（工程师新增 20 项守护用例 + QA 二轮新增 19 项独立验证用例 + 三轮 8 项缺陷守护，共 47 项；既有 374 项零回归），`ruff` 全绿，`services/**` 零 astrbot 导入，`-X dev` 下 0 warnings。8 项 P2 中 **7 项为代码修复、1 项（P2-08）为文档说明**；P2-07 因 `main.py` 依赖 AstrBot 运行时，本地只能以 AST/源码守卫锁定，真实双开与热重载时序仍列入 §5 的人工联调。
+**回归结论**：**426 项全绿、0 xfailed**（工程师新增 20 项守护用例 + QA 二轮新增 19 项独立验证用例 + 三四轮 13 项缺陷守护，共 52 项；既有 374 项零回归），`ruff` 全绿，`services/**` 零 astrbot 导入，`-X dev` 下 0 warnings。8 项 P2 中 **7 项为代码修复、1 项（P2-08）为文档说明**；P2-07 因 `main.py` 依赖 AstrBot 运行时，本地只能以 AST/源码守卫锁定，真实双开与热重载时序仍列入 §5 的人工联调。
 
-> 基线口径：冷启动实测 **370 passed + 4 xfailed = 374 collected**（1 项 P1 + 3 项 P2 均带 `xfail`）。二轮把这 4 个标记全部删除并转为普通回归用例；三轮再补 8 项。因此门禁从「370/374 通过 + xfail」变为「421 全绿、0 xfail、0 skip」。
+> 基线口径：冷启动实测 **370 passed + 4 xfailed = 374 collected**（1 项 P1 + 3 项 P2 均带 `xfail`）。二轮把这 4 个标记全部删除并转为普通回归用例；三四轮再补 13 项。因此门禁从「370/374 通过 + xfail」变为「426 全绿、0 xfail、0 skip」。
 
 > 二轮收尾增补（主理人复核时新发现，已一并修复并纳入上表数字）：① `/cr history` 原先返回全部事件（含 Watch/预测），已收窄为 `group_kind="reset"` 并改文案为「确认重置」；② 软单实例在插件热重载时存在**误判风险**——旧实例心跳仍新鲜会让新实例永久只读，已引入 `runtime:shutdown_at` 干净退出标记 + 同 pid 检测，且只读实例不创建任何投递任务（`test_qa_task_lifecycle.py` 新增 2 项守护）；③ 「新 Watch / 确认重置后下一槽位强制 timeline」的用例原先预置响应不全（强制后下一拍实际是 `feed`），已补 `feed` 响应并断言完整轮换序列 `["forecast","timeline","feed"]`。
-
-### 0.2 三轮：QA 复验发现的问题（P1-03 / P2-09~11 / O-7）与修复
-
-QA 对上述 3 处收尾改动做了只读复验，判定为「1 项 PASS、1 项 FAIL、1 项 PASS」并新增 4 个缺陷。**全部已修复**，门禁从 413 升至 **421 passed / 0 failed / 0 xfailed / 0 warnings**。
-
-| 编号 | 问题（QA 判定） | 修复 | 守护用例 |
-|---|---|---|---|
-| **P1-03** | `terminate()` 的 `worker.stop()`/`gather()`/`client.close()` 不在 `try/finally` 内：任何一步抛异常都会跳过「写 `runtime:shutdown_at` + 关库」，留下「心跳新鲜 + 无标记」的残局 → 下次启动把自己误判成活实例，**永久只读**，只能手工删库恢复 | `main.py:364-404`：`terminate` 改为 `try/finally`，`finally` 调新增的 `_release_runtime()`（写标记 + `repo.close()`，各自独立 try 兜底） | `test_qa_task_lifecycle.py::test_terminate_writes_shutdown_marker_even_if_worker_stop_raises`（把 `_worker` 换成 `stop()` 必抛的对象，用独立 `sqlite3` 句柄确认标记已落库） |
-| **P2-09** | 站点把某条 reset 降级时，`reset_corrections` 写的更正事件 `group_kind` 仍是 `reset`（`state_version="downgraded:announced"`）→ `/cr history` 把**已撤回**的重置当成「已确认」列出，用户可见误导 | `services/repository.py:746-775`（`list_events(exclude_corrections=True)` → SQL `state_version NOT LIKE 'downgraded%'`）；`services/commands.py:413-415` history 走该开关 | `test_commands.py::test_history_excludes_non_reset_and_downgraded_rows`（更晚发生的 watch/credits/forecast + 降级更正都必须不出现）、`test_repository.py::test_list_events_excludes_downgraded_corrections`（同时断言「未过滤时确实包含」以证明过滤器有效而非空转） |
-| **P2-10** | 只读实例仍可执行写指令：实测只读实例 `/cr subscribe` 返回「✅ 订阅成功」，subscriptions 0→1 | `services/commands.py:70-78`（`WRITE_COMMANDS={subscribe,unsubscribe,set}` + `READONLY_TEXT`）、`:176-196`（注入 `readonly_provider`）、`:211-214`（权限判定之后、限频之前拦截，返回 `error="readonly"`）；`main.py:322` 传 `lambda: self._readonly` | `test_commands.py::test_readonly_instance_rejects_write_commands_but_allows_queries`、`test_qa_task_lifecycle.py::test_live_other_instance_forces_readonly_without_delivery`（追加断言：owner 未被改写 / deliveries==0 / 写指令 `error=="readonly"`） |
-| **P2-11** | 抢占非原子：三次独立 `meta_get` + 一次 `meta_set`，两个实例会各自读到「无主」快照而**双双持锁**（实测两实例 `readonly` 均为 False，后到者覆盖了 owner） | `services/repository.py:277-296`（新增 `atomic_meta()`：`BEGIN IMMEDIATE` + `MetaView.get/set/delete` 共用同一连接）；`main.py:455-500`（`_claim_runtime_owner` 全程在单个 `atomic_meta()` 内完成判定与写入，只读分支提前 return） | `test_repository.py::test_atomic_meta_rolls_back_on_exception`、`::test_atomic_meta_reads_see_writes_of_same_transaction`、`test_qa_task_lifecycle.py::test_claim_runtime_owner_does_not_nest_meta_transactions`（把「不得再走 `meta_set`」变成可执行约束）、`::test_second_instance_cannot_overwrite_live_owner` |
-| **O-7** | 全量运行偶发 `Event loop is closed` | `-X dev` 定位到唯一泄漏源：`tests/test_qa_false_positive.py` 两个集成用例直接调 `make_env()` 却未 `close()`（2 条 aiosqlite 连接延迟到 GC 回收）。已改 `try/finally: await repo.close()` | `python -X dev -m pytest tests -q` → **421 passed、0 warnings** |
-
-> 原子性另做了并发实证（脚本级，非用例）：实例 A 在 `atomic_meta()` 内写 owner 后 `sleep(0.15s)`，实例 B 的 `atomic_meta()` 被写锁阻塞，读到的是 A 已提交的值（`111:aaaa`）而非 `None` —— 旧的分步实现下 B 会读到旧值。该实证与 `test_second_instance_cannot_overwrite_live_owner` 互为表里。
-
 
 ### 0.1 QA 独立复验（不采信工程师结论）
 
@@ -68,20 +53,47 @@ QA 对上述 3 处收尾改动做了只读复验，判定为「1 项 PASS、1 �
 
 ---
 
+### 0.2 三轮：QA 复验发现的问题（P1-03 / P2-09~11 / O-7）与修复
+
+QA 对上述 3 处收尾改动做了只读复验，判定为「1 项 PASS、1 项 FAIL、1 项 PASS」并新增 4 个缺陷。**全部已修复**，门禁从 413 升至 **426 passed / 0 failed / 0 xfailed / 0 warnings**。
+
+| 编号 | 问题（QA 判定） | 修复 | 守护用例 |
+|---|---|---|---|
+| **P1-03** | `terminate()` 的 `worker.stop()`/`gather()`/`client.close()` 不在 `try/finally` 内：任何一步抛异常都会跳过「写 `runtime:shutdown_at` + 关库」，留下「心跳新鲜 + 无标记」的残局 → 下次启动把自己误判成活实例，**永久只读**，只能手工删库恢复 | `main.py:364-404`：`terminate` 改为 `try/finally`，`finally` 调新增的 `_release_runtime()`（写标记 + `repo.close()`，各自独立 try 兜底） | `test_qa_task_lifecycle.py::test_terminate_writes_shutdown_marker_even_if_worker_stop_raises`（把 `_worker` 换成 `stop()` 必抛的对象，用独立 `sqlite3` 句柄确认标记已落库） |
+| **P2-09** | 站点把某条 reset 降级时，`reset_corrections` 写的更正事件 `group_kind` 仍是 `reset`（`state_version="downgraded:announced"`）→ `/cr history` 把**已撤回**的重置当成「已确认」列出，用户可见误导 | `services/repository.py:746-775`（`list_events(exclude_corrections=True)` → SQL `state_version NOT LIKE 'downgraded%'`）；`services/commands.py:413-415` history 走该开关 | `test_commands.py::test_history_excludes_non_reset_and_downgraded_rows`（更晚发生的 watch/credits/forecast + 降级更正都必须不出现）、`test_repository.py::test_list_events_excludes_downgraded_corrections`（同时断言「未过滤时确实包含」以证明过滤器有效而非空转） |
+| **P2-10** | 只读实例仍可执行写指令：实测只读实例 `/cr subscribe` 返回「✅ 订阅成功」，subscriptions 0→1 | `services/commands.py:70-78`（`WRITE_COMMANDS={subscribe,unsubscribe,set}` + `READONLY_TEXT`）、`:176-196`（注入 `readonly_provider`）、`:211-214`（权限判定之后、限频之前拦截，返回 `error="readonly"`）；`main.py:322` 传 `lambda: self._readonly` | `test_commands.py::test_readonly_instance_rejects_write_commands_but_allows_queries`、`test_qa_task_lifecycle.py::test_live_other_instance_forces_readonly_without_delivery`（追加断言：owner 未被改写 / deliveries==0 / 写指令 `error=="readonly"`） |
+| **P2-11** | 抢占非原子：三次独立 `meta_get` + 一次 `meta_set`，两个实例会各自读到「无主」快照而**双双持锁**（实测两实例 `readonly` 均为 False，后到者覆盖了 owner） | `services/repository.py:277-296`（新增 `atomic_meta()`：`BEGIN IMMEDIATE` + `MetaView.get/set/delete` 共用同一连接）；`main.py:455-500`（`_claim_runtime_owner` 全程在单个 `atomic_meta()` 内完成判定与写入，只读分支提前 return） | `test_repository.py::test_atomic_meta_rolls_back_on_exception`、`::test_atomic_meta_reads_see_writes_of_same_transaction`、`test_qa_task_lifecycle.py::test_claim_runtime_owner_does_not_nest_meta_transactions`（把「不得再走 `meta_set`」变成可执行约束）、`::test_second_instance_cannot_overwrite_live_owner` |
+| **O-7** | 全量运行偶发 `Event loop is closed` | `-X dev` 定位到唯一泄漏源：`tests/test_qa_false_positive.py` 两个集成用例直接调 `make_env()` 却未 `close()`（2 条 aiosqlite 连接延迟到 GC 回收）。已改 `try/finally: await repo.close()` | `python -X dev -m pytest tests -q` → **426 passed、0 warnings** |
+
+> 原子性另做了并发实证（脚本级，非用例）：实例 A 在 `atomic_meta()` 内写 owner 后 `sleep(0.15s)`，实例 B 的 `atomic_meta()` 被写锁阻塞，读到的是 A 已提交的值（`111:aaaa`）而非 `None` —— 旧的分步实现下 B 会读到旧值。该实证与 `test_second_instance_cannot_overwrite_live_owner` 互为表里。
+
+
+
+### 0.3 四轮：QA 复验再发现的两个「双写共存」漏洞（P1-04 / P2-12）
+
+QA 对三轮修复的复验结论是「P1-03 / P2-09 / P2-10 真修好，P2-11 的原子性成立但窗口未真正关闭」，并给出两个**不需要任何异常**就能触发双写的时序。均已修复：
+
+| 编号 | 问题（QA 判定） | 修复 | 守护用例 |
+|---|---|---|---|
+| **P1-04** | `runtime:shutdown_at` 只是时间戳、**没有写者身份**，却被拿去和 `runtime:owner` 的心跳比较。只读实例 B 退出时也会写这个键，于是第三实例 C 把「B 的退出」当成「持锁者 A 的干净退出」→ 接管 → A、C 同时可写。触发条件仅为「只读实例寿命 > owner 一次心跳间隔」，无需异常 | `main.py` 新增 `_split_shutdown()`（值改为 `"{owner}|{iso}"`，解析不出 owner 即 fail-closed）、`_release_runtime()` 写带身份的标记、干净退出判定追加 `clean_owner == previous` | `test_qa_task_lifecycle.py::test_readonly_instance_exit_must_not_authorize_takeover`（A 持锁→B 只读→B 退出→C 启动，C 必须仍只读且 owner 不变）、`::test_legacy_shutdown_marker_without_identity_is_not_trusted`（旧格式纯 ISO 标记必须不被信任） |
+| **P2-12** | 抢占只在采集轮次（`on_round`）写心跳：`enable_monitor=false`、全新库或首轮未完成时 `heartbeat is None` → 判定不了存活 → 直接落到「写 owner」分支，两实例同时可写（实测 `readonly=(False, False)`） | 抢占**同事务**写 `heartbeat_at`；`_config_watch_loop`（常驻任务）每 5s `_touch_heartbeat()`，且只由持锁实例写，覆盖「不开采集」场景 | `test_qa_task_lifecycle.py::test_claim_publishes_heartbeat_to_close_fail_open_window`（`enable_monitor=false` 下首次 initialize 后心跳必须已存在，且第二实例必须只读） |
+
+> 另按 QA 建议修掉的 P3：① 事务内嵌套 `meta_set` 原来会**永久自锁**且无任何报错，`_tx()` 现以 task 身份快速失败（`test_repository.py::test_nested_meta_write_inside_transaction_fails_fast`）；② `list_events(limit=-1)` 在 SQLite 等价「无上限」，已收敛为 0（`::test_list_events_negative_limit_is_clamped`）；③ 只读拒绝补审计（`{sub}:readonly`）；④ `worker.stop()` 异常日志由 warning 升为 **error** 并记 `_stop_error`；⑤ `terminate` 增加 `_released` 幂等位，第二次调用不再产生「写入 shutdown 标记失败」的噪声告警。
+
 ## 1. 执行摘要
 
 | 项 | ① 基线（QA 介入前，冷启动） | ② QA 初判（带 xfail） | ③ 二轮修复后 | ④ **终态（交付门禁）** |
 |---|---|---|---|---|
-| `pytest tests -q` | **236 passed** / 17.96s | 370 passed + 4 xfailed / 29.37s | 413 passed / 6.37s | **421 passed / 7.73s**，0 xfail、0 skip、0 error、**0 warnings**（`-X dev` 亦 0） |
+| `pytest tests -q` | **236 passed** / 17.96s | 370 passed + 4 xfailed / 29.37s | 413 passed / 6.37s | **426 passed / 6.79s**，0 xfail、0 skip、0 error、**0 warnings**（`-X dev` 亦 0） |
 | 其中工程师用例 | 236 | 236 passed（零回归） | 256 passed | **256 passed**（+20 项二轮守护，既有 236 项零回归） |
-| 其中 QA 独立用例 | — | 138 collected（134 passed + 4 xfailed） | 157 passed | **165 passed**（+8 项三轮缺陷守护：repository 3、commands 2、lifecycle 3） |
+| 其中 QA 独立用例 | — | 138 collected（134 passed + 4 xfailed） | 157 passed | **170 passed**（+13 项三四轮缺陷守护：repository 5、commands 2、lifecycle 6） |
 | `ruff check services tests main.py` | All checks passed | All checks passed | All checks passed | **All checks passed** |
 | `grep -rn "import astrbot" services/` | 无输出 | 无输出 | 无输出 | **无输出**（分层纪律保持） |
 
-- 通过率：**421 / 421 = 100%**，无 `xfail`、无 `skip`、无 error。历史上那 4 项 `xfail`（1 项 P1 + 3 项 P2，详见 §3）在缺陷修复后已全部删除标记、转为普通回归用例——**不是**靠 XPASS 变绿。
+- 通过率：**426 / 426 = 100%**，无 `xfail`、无 `skip`、无 error。历史上那 4 项 `xfail`（1 项 P1 + 3 项 P2，详见 §3）在缺陷修复后已全部删除标记、转为普通回归用例——**不是**靠 XPASS 变绿。
 - 代码风格：QA 新增 9 个文件全部通过 `ruff`（line-length 110 / py312 / E,F,W,I,B,UP）。
 - 未放宽任何断言：转正时逐条比对过断言强度（持平或更强）；缺陷仍存在时所有 `xfail` 都写了「按 PRD 应当如何」的断言并用 `reason` 指向缺陷编号，**没有**把实现现状当预期。
-- 用例分布（`--collect-only` 实测）：QA 侧 `qa_degradation` 34 / `qa_false_positive` 31 / `qa_permissions` 28 / `qa_task_lifecycle` 20 / `qa_force_timeline` 17 / `qa_rate_limit` 16 / `qa_history_flood` 8 / `qa_cross_api` 6 = 165；工程师侧 `repository` 36 / `parser` 26 / `commands` 22 / `config` 21 / `templates` 20 / `watch` 19 / `pipeline` 19 / `classifier` 18 / `forecast` 17 / `dedupe` 16 / `scheduler` 12 / `client` 12 / `schema` 10 / `credits` 8 / `acceptance_matrix` 3 / `integration` 2 = 256。
+- 用例分布（`--collect-only` 实测）：QA 侧 `qa_degradation` 34 / `qa_false_positive` 31 / `qa_permissions` 28 / `qa_task_lifecycle` 23 / `qa_force_timeline` 17 / `qa_rate_limit` 16 / `qa_history_flood` 8 / `qa_cross_api` 6 = 170；工程师侧 `repository` 38 / `parser` 26 / `commands` 22 / `config` 21 / `templates` 20 / `watch` 19 / `pipeline` 19 / `classifier` 18 / `forecast` 17 / `dedupe` 16 / `scheduler` 12 / `client` 12 / `schema` 10 / `credits` 8 / `acceptance_matrix` 3 / `integration` 2 = 256。
 
 ---
 
@@ -208,7 +220,7 @@ QA 对上述 3 处收尾改动做了只读复验，判定为「1 项 PASS、1 �
 | O-4 | `admin_only_subscription` 未参与任何判定 | `services/commands.py`（无引用） | PRD §4.1 与 U-2：V1.2 仍只放行 `is_admin`，字段仅"预留"；建议启动时记一行日志 |
 | O-5 | `credits_state` 更正模板分支无生产者 | `services/notifications.py:364-369` | 保留分支无害 |
 | O-6 | **强制 timeline 不消费轮换槽位 → 可能出现连续两次 timeline** | `services/scheduler.py:97-110`（`_pending` 分支不推进 `_pointer`） | 与架构 §D「强制只插入一次性优先级，不破坏轮换指针」一致，故不算缺陷；副作用是 `forecast → 强制 timeline → 轮换 timeline` 连采两次（工程师因此重排了 `test_integration.py` 的轮次序列）。若后续想要「强制即占用当轮槽位」，应改架构文档后再动代码；`test_qa_force_timeline.py::test_forced_slot_wins_over_rotation_and_keeps_pointer` 已锁定当前语义 |
-| O-7 | 全量运行时偶发 `PytestUnhandledThreadExceptionWarning: Event loop is closed` | 跨文件（单文件运行不复现） | aiosqlite 连接线程晚于事件循环收尾，属测试卫生问题，不影响判定结果；建议后续给残留仓库统一走 `qa_helpers.env()` 上下文管理器 | **已修（2026-10-20 收尾）**：`-X dev` 定位到唯一泄漏源 `tests/test_qa_false_positive.py` 的两个集成用例直接调 `make_env()` 却未 `close()`（2 条 aiosqlite 连接在 GC 时才回收）。已改为 `try/finally: await repo.close()`；`python -X dev -m pytest tests -q` 现为 **421 passed、0 warnings**（此前 2 warnings） |
+| O-7 | 全量运行时偶发 `PytestUnhandledThreadExceptionWarning: Event loop is closed` | 跨文件（单文件运行不复现） | aiosqlite 连接线程晚于事件循环收尾，属测试卫生问题，不影响判定结果；建议后续给残留仓库统一走 `qa_helpers.env()` 上下文管理器 | **已修（2026-10-20 收尾）**：`-X dev` 定位到唯一泄漏源 `tests/test_qa_false_positive.py` 的两个集成用例直接调 `make_env()` 却未 `close()`（2 条 aiosqlite 连接在 GC 时才回收）。已改为 `try/finally: await repo.close()`；`python -X dev -m pytest tests -q` 现为 **426 passed、0 warnings**（此前 2 warnings） |
 
 ---
 
@@ -303,11 +315,11 @@ QA 对上述 3 处收尾改动做了只读复验，判定为「1 项 PASS、1 �
 
 ## 6. 结论：**有条件交付 → 条件 C1 已满足**
 
-> **第二轮更新（2026-10-20）**：P1-01 / P1-02 / P2-01~07 及附加 A/B/C 已全部修复，全量 **421 passed / 0 xfailed**（三轮又修掉 P1-03 与 P2-09~11，见 §0.2）、`ruff` 全绿、`services/**` 零 astrbot 导入（明细见 §0）。据此 **C1 已满足**（选择「修复」而非「接受偏差」）、**C3 已满足**（`banked_grant` 不参与判定已写入 PRD D-03 与 README F04）；**C2（10 项人工联调）仍待验收**，`docs/ACCEPTANCE.md` 保持原状。
+> **第二轮更新（2026-10-20）**：P1-01 / P1-02 / P2-01~07 及附加 A/B/C 已全部修复，全量 **426 passed / 0 xfailed**（三四轮又修掉 P1-03、P1-04 与 P2-09~12，见 §0.2 / §0.3）、`ruff` 全绿、`services/**` 零 astrbot 导入（明细见 §0）。据此 **C1 已满足**（选择「修复」而非「接受偏差」）、**C3 已满足**（`banked_grant` 不参与判定已写入 PRD D-03 与 README F04）；**C2（10 项人工联调）仍待验收**，`docs/ACCEPTANCE.md` 保持原状。
 
 **判定理由**
 
-1. **质量面达标**：全量 421 项全部通过（370 基线 + 4 项原 xfail 转正 + 47 项新增守卫），既有 236 项**零回归**，`ruff` 全绿；5 类高风险项的核心判定全部 **PASS**，AC-02/AC-06/AC-03/AC-04/AC-15/AC-16/AC-22/AC-23 的 PRD 条款均被独立断言守住；无 P0（无误报、无刷屏、无数据损坏、无崩溃）。
+1. **质量面达标**：全量 426 项全部通过（370 基线 + 4 项原 xfail 转正 + 52 项新增守卫），既有 236 项**零回归**，`ruff` 全绿；5 类高风险项的核心判定全部 **PASS**，AC-02/AC-06/AC-03/AC-04/AC-15/AC-16/AC-22/AC-23 的 PRD 条款均被独立断言守住；无 P0（无误报、无刷屏、无数据损坏、无崩溃）。
 2. **存在 2 项 P1**：P1-01（`force_timeline` 未接线，PRD §2 明文功能缺失，仅影响时效）、P1-02（投递无发送超时，适配器挂起会导致投递链停摆）。二者都不影响"会不会误报/重复"，但都触碰**已冻结的 PRD 行为**，不应在"可交付"里被默认接受。
 3. **8 项 P2 + 5 项观察项**已逐条给出文件行号与修法，其中 P2-08 是 PRD 内部冲突（建议只改文档，不改代码），P2-01/P2-02/P2-03 已有 xfail 用例锁定，修好后自动转 XPASS 作为回归门禁。
 4. **4 项 AC（15/16/17/22）必须真实群联调**：按 PRD §3，模拟测试不得替代"通过"；当前状态只能记 `待验收`。
@@ -318,7 +330,7 @@ QA 对上述 3 处收尾改动做了只读复验，判定为「1 项 PASS、1 �
 - **C2**：§5 的 10 项人工联调完成并回填 `docs/ACCEPTANCE.md`，尤其 AC-15/16/17/22。→ **待验收**
 - **C3**：P2-08 的 PRD 内部冲突在 `docs/PRD-confirmation.md` 或 README 注明（`banked_grant` 不参与权益判定），避免后续维护者按 F04 字面"修正"而打破 AC-12。→ **已满足（PRD D-03 + README §1 F04 行）**
 
-> C1 选择的是"修复"路径：最终回归结果 **421 passed / 0 xfailed**（既有 374 项零回归 + 新增 47 项 = 工程师 20 项守护 + QA 27 项独立验证），4 个 xfail 标记已全部删除并转为普通回归用例。剩余交付前置条件只有 C2。
+> C1 选择的是"修复"路径：最终回归结果 **426 passed / 0 xfailed**（既有 374 项零回归 + 新增 52 项 = 工程师 20 项守护 + QA 32 项独立验证），4 个 xfail 标记已全部删除并转为普通回归用例。剩余交付前置条件只有 C2。
 
 ---
 

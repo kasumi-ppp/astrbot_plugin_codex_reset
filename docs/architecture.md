@@ -710,14 +710,13 @@ sequenceDiagram
 3. **预测 `state_version` 需要「当日第 2 条」能力**：`ForecastState` 新增 `alert_seq: int = 0`（DDL 同步 `alert_seq INTEGER NOT NULL DEFAULT 0`，`Repository.open()` 用 `PRAGMA table_info(forecast_state)` 检测并对旧库 `ALTER TABLE … ADD COLUMN`），版本规范改为 `{window_kind}:{epoch_seq}:{alert_seq}`；`alert_seq` 每产生一条预测消息 +1，`epoch_seq` 仅在确认重置时 +1（re-arm 不改 epoch，D-05 语义不变）。
    这样同日第二波概率升高不会被 `UNIQUE(subscription_id, logical_id, state_version)` 吞掉，仍受 `cooldown_hours` 与 `daily_max` 双重约束。
 
-4. **软单实例的判定必须原子，只读必须「全写路径关闭」**（三轮修正，对应 P1-03 / P2-10 / P2-11）：
-   - 抢占「读 `runtime:owner`/`heartbeat_at`/`shutdown_at` → 判定 → 写 owner → 清退出标记」从四次独立 meta 操作改为**单个 `BEGIN IMMEDIATE` 事务**（新增 `Repository.atomic_meta()` + `MetaView.get/set/delete`）。原分步实现下两个实例会各自读到「无主」快照并双双持锁，成为双写者。
+4. **软单实例的判定必须原子，只读必须「全写路径关闭」**（三轮修正，P1-03 / P2-10 / P2-11）：
+   - 抢占「读 `runtime:owner`/`heartbeat_at`/`shutdown_at` → 判定 → 写 owner → 清退出标记」从四次独立 meta 操作改为**单个 `BEGIN IMMEDIATE` 事务**（新增 `Repository.atomic_meta()` + `MetaView.get/set/delete`）。原分步实现下两个实例会各自读到「无主」快照并双双持锁，成为双写者。事务内再嵌套 `meta_set` 会因 `asyncio.Lock` 不可重入而**永久自锁**，`_tx()` 现以 task 身份做快速失败（只拦同 task 重入，其它 task 正常排队等锁）。
    - `terminate()` 的整个收尾序列包进 `try/finally`，`finally` 调 `_release_runtime()` 写 `runtime:shutdown_at` 并关库：任何一步抛异常都不能跳过「干净退出」标记，否则下次启动会把「刚异常退出的自己」误判成活实例而**永久只读**。
-   - 只读不再只关闭「采集 + 投递」两条写路径：`CommandService` 新增 `readonly_provider`，`subscribe / unsubscribe / set` 三个写指令统一返回「只读模式」提示（查询不受影响）。原实现下只读实例仍能成功 `/cr subscribe`，会让两个实例的群配置互相覆盖。
-   - 语义边界：只读实例**不**写 owner、不 bootstrap、不建投递任务、不改订阅；退出时**仍**写自己的 shutdown 标记（覆盖 owner 的退出标记，因为 owner 一直活着，其心跳会继续刷新，不会误触发接管）。
+   - 只读不再只关闭「采集 + 投递」两条写路径：`CommandService` 新增 `readonly_provider`，`subscribe / unsubscribe / set` 三个写指令统一返回「只读模式」提示并写审计（查询不受影响）。原实现下只读实例仍能成功 `/cr subscribe`，会让两个实例的群配置互相覆盖。
 
-4. **软单实例的判定必须原子，只读必须「全写路径关闭」**（三轮修正，对应 P1-03 / P2-10 / P2-11）：
-   - 抢占「读 `runtime:owner`/`heartbeat_at`/`shutdown_at` → 判定 → 写 owner → 清退出标记」从四次独立 meta 操作改为**单个 `BEGIN IMMEDIATE` 事务**（新增 `Repository.atomic_meta()` + `MetaView.get/set/delete`）。原分步实现下两个实例会各自读到「无主」快照并双双持锁，成为双写者。
-   - `terminate()` 的整个收尾序列包进 `try/finally`，`finally` 调 `_release_runtime()` 写 `runtime:shutdown_at` 并关库：任何一步抛异常都不能跳过「干净退出」标记，否则下次启动会把「刚异常退出的自己」误判成活实例而**永久只读**。
-   - 只读不再只关闭「采集 + 投递」两条写路径：`CommandService` 新增 `readonly_provider`，`subscribe / unsubscribe / set` 三个写指令统一返回「只读模式」提示（查询不受影响）。原实现下只读实例仍能成功 `/cr subscribe`，会让两个实例的群配置互相覆盖。
-   - 语义边界：只读实例**不**写 owner、不 bootstrap、不建投递任务、不改订阅；退出时**仍**写自己的 shutdown 标记（覆盖 owner 的退出标记，因为 owner 一直活着，其心跳会继续刷新，不会误触发接管）。
+5. **退出标记必须带身份，所有权必须自带心跳**（四轮修正，P1-04 / P2-12）：
+   - `runtime:shutdown_at` 的值从纯 ISO 改为 `"{owner}|{iso}"`，解析走 `_split_shutdown()`；**只有标记里的 owner == `runtime:owner`** 且 `shutdown_at >= heartbeat_at` 才认作「干净退出」。原设计（纯时间戳）没有写者身份，却被拿去和别人的心跳比较：只读实例退出后，第三实例会把「只读者的退出」当成「持锁者的干净退出」，在 owner 仍活着时接管 → 两个实例同时可写。旧格式（无 `|`）一律 fail-closed，宁可要求运维重启一次。
+   - 抢占成功时**同事务**写 `runtime:heartbeat_at`：否则 `enable_monitor=false` 或首轮未完成时会出现「owner 存在但心跳为空」，后来的实例判定不了存活状态 → 落进 fail-open 分支直接抢锁（P2-12）。
+   - `_config_watch_loop`（常驻任务）每 `POLL_TICK_SECONDS` 刷新一次心跳，且**只由持锁实例写**：`enable_monitor=false` 时没有采集轮次，只靠 `on_round` 写心跳会让存活证明消失。
+   - 语义边界：只读实例不写 owner、不写心跳、不 bootstrap、不建投递任务、不改订阅；退出时**仍**写自己的退出标记（带自己的身份），因此不会被后来的实例误读为「持锁者已退出」。

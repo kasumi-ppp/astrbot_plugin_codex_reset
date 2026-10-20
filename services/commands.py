@@ -224,6 +224,7 @@ class CommandService:
 
         # 权限判定在前（越权者看到的永远是权限文案），只读判定在后且不消耗限频额度
         if sub in WRITE_COMMANDS and self._readonly():
+            await self._audit(req, f"{sub}:readonly", "readonly", at=now)
             return CommandReply(text=self._finalize(READONLY_TEXT), error="readonly")
 
         wait = self.check_rate(req.umo, sub, now)

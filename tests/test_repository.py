@@ -906,3 +906,29 @@ def test_atomic_meta_reads_see_writes_of_same_transaction(repo: Repository) -> N
     seen, checked = run(scenario())
     assert seen == "111:aaaa"
     assert checked is True
+
+
+def test_nested_meta_write_inside_transaction_fails_fast(repo: Repository) -> None:
+    """P2-11 补强：事务内嵌套 meta 写必须**立即报错**，而不是永久自锁。
+
+    `asyncio.Lock` 不可重入，误用时表现为「命令永远卡住」这种最难排查的故障。
+    """
+
+    async def scenario() -> None:
+        async with repo.atomic_meta() as tx:
+            await tx.set("runtime:owner", "111:aaaa")
+            with pytest.raises(RuntimeError, match="嵌套"):
+                await repo.meta_set("runtime:owner", "222:bbbb")
+
+    run(scenario())
+
+
+def test_list_events_negative_limit_is_clamped(repo: Repository) -> None:
+    """SQLite 的 `LIMIT -1` 等于无上限：负数必须收敛为 0，否则上限形同虚设。"""
+
+    async def scenario() -> int:
+        await repo.record_logical_event(make_logical_event("reset:a"), baseline=False)
+        await repo.record_logical_event(make_logical_event("reset:b"), baseline=False)
+        return len(await repo.list_events(group_kind="reset", limit=-1))
+
+    assert run(scenario()) == 0

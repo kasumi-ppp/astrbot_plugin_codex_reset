@@ -756,3 +756,97 @@ def test_second_instance_cannot_overwrite_live_owner(tmp_path, monkeypatch):
     assert owner_before is not None
     assert readonly is True, "活实例持锁时后到者必须只读"
     assert owner_after == owner_before, "只读实例不得把 owner 改成自己"
+
+
+def test_readonly_instance_exit_must_not_authorize_takeover(tmp_path, monkeypatch):
+    """P1-04：只读实例退出**不得**让第三实例抢走活 owner 的运行权。
+
+    触发序列（无需任何异常，只要只读实例活得比 owner 一次心跳间隔久）：
+    A 持锁 → B 只读 → B 退出写 `runtime:shutdown_at` → C 启动。
+    若退出标记不带身份，C 会把「B 的退出」当成「A 的干净退出」而接管，
+    结果 A、C 同时可写（双倍采集 + 配置互抢）。
+    """
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        first = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await first.initialize()
+        await first.repo.meta_set("runtime:heartbeat_at", first.clock.utcnow().isoformat())
+        owner_a = await first.repo.meta_get("runtime:owner")
+
+        monkeypatch.setattr(main.os, "getpid", lambda: 422)
+        second = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await second.initialize()
+        second_readonly = second._readonly  # noqa: SLF001
+        await second.terminate()  # 只读实例退出：写带自己身份的退出标记
+        marker = await first.repo.meta_get("runtime:shutdown_at")
+
+        monkeypatch.setattr(main.os, "getpid", lambda: 433)
+        third = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await third.initialize()
+        third_readonly = third._readonly  # noqa: SLF001
+        owner_now = await third.repo.meta_get("runtime:owner")
+        await third.terminate()
+        await first.terminate()
+        return second_readonly, third_readonly, owner_a, owner_now, marker
+
+    second_readonly, third_readonly, owner_a, owner_now, marker = run(scenario())
+
+    assert second_readonly is True, "B 在 A 心跳新鲜时必须只读"
+    assert marker is not None and "|" in marker, "退出标记必须带 owner 身份（格式 owner|iso）"
+    assert third_readonly is True, "C 不得把 B 的退出当成 A 的干净退出而接管"
+    assert owner_now == owner_a, "owner 仍应是 A"
+
+
+def test_claim_publishes_heartbeat_to_close_fail_open_window(tmp_path, monkeypatch):
+    """P2-12：取得所有权时必须**同事务**写心跳，否则后续实例落进 fail-open 分支。
+
+    `enable_monitor=false` 时没有采集轮次、心跳永远为空；旧实现里新实例读到
+    「owner 存在但心跳为空」会判定不了 → 直接抢锁 → 两实例同时可写。
+    """
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        first = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await first.initialize()
+        heartbeat = await first.repo.meta_get("runtime:heartbeat_at")
+
+        monkeypatch.setattr(main.os, "getpid", lambda: 777)
+        second = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await second.initialize()
+        readonly = second._readonly  # noqa: SLF001
+        await second.terminate()
+        await first.terminate()
+        return heartbeat, readonly
+
+    heartbeat, readonly = run(scenario())
+
+    assert heartbeat is not None, "抢占成功当次就必须写下心跳（不等第一轮采集）"
+    assert readonly is True, "有 owner 且心跳新鲜时，后来的实例必须只读"
+
+def test_legacy_shutdown_marker_without_identity_is_not_trusted(tmp_path, monkeypatch):
+    """P1-04：无身份的旧格式退出标记（纯 ISO）必须**不**被信任。
+
+    这正是修复前的形态：只读实例退出写一个纯时间戳，第三实例拿它和 owner 的心跳比
+    `shutdown_at >= heartbeat` 就直接接管 —— owner 还在跑，却多了一个写者。
+    新实现解析不出 owner 时一律 fail-closed（只读），宁可让运维重启一次，
+    也不允许两个实例同时写。
+    """
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        first = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await first.initialize()
+        await first.repo.meta_set("runtime:heartbeat_at", first.clock.utcnow().isoformat())
+        # 旧版本只读实例的写法：纯 ISO，没有 owner 身份
+        await first.repo.meta_set("runtime:shutdown_at", first.clock.utcnow().isoformat())
+
+        monkeypatch.setattr(main.os, "getpid", lambda: 433)
+        third = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await third.initialize()
+        readonly = third._readonly  # noqa: SLF001
+        await third.terminate()
+        await first.terminate()
+        return readonly
+
+    assert run(scenario()) is True, "无身份的退出标记不得作为接管依据"

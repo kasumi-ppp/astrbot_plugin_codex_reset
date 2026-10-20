@@ -83,11 +83,16 @@ RUNTIME_HEARTBEAT_KEY = "runtime:heartbeat_at"
 """最近一次采集轮次时间（心跳）；用于判断「他实例是否仍在运行」。"""
 
 RUNTIME_SHUTDOWN_KEY = "runtime:shutdown_at"
-"""最近一次干净退出的时间。
+"""最近一次干净退出的记录，值格式 `"{owner}|{iso}"`（**必须带身份**）。
 
 用途：插件热重载/重启时心跳可能仍在 `2×spacing` 内，若只按心跳判定会把
 「刚退出的自己」误认成「另一个活实例」而永久进入只读模式。退出时写该键，
-启动时若 `shutdown_at >= heartbeat_at` 说明对方是干净退出，可直接接管。
+启动时若「标记里的 owner == 记录中的 owner」且 `shutdown_at >= heartbeat_at`，
+说明**那个持锁实例**是干净退出，可直接接管。
+
+为什么必须带 owner（P1-04）：只读实例退出时也会写标记。若标记不带身份，
+第三实例会把「只读实例的退出」误当成「持锁实例的干净退出」而在 owner 仍活着时
+抢锁，两个实例同时可写。带身份后，只有「记录里的 owner 自己写的退出标记」才算数。
 """
 
 HEALTH_KEY_PREFIX = "health:"
@@ -120,6 +125,20 @@ def _parse_iso(text: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _split_shutdown(value: Any) -> tuple[str | None, datetime | None]:
+    """解析 `runtime:shutdown_at`（`"{owner}|{iso}"`）→ `(owner, 时间)`。
+
+    旧格式（纯 ISO，无身份）一律返回 `(None, None)`：**不认**为干净退出（fail-closed）。
+    否则「只读实例写的标记」会被当成「持锁实例干净退出」，在 owner 仍活着时放行第二个写者（P1-04）。
+    """
+    if not isinstance(value, str) or "|" not in value:
+        return None, None
+    owner, _, stamp = value.partition("|")
+    if not owner.strip() or not stamp.strip():
+        return None, None
+    return owner.strip(), _parse_iso(stamp)
 
 
 class _PluginHooks(NullPipelineHooks):
@@ -190,6 +209,9 @@ class CodexResetRadar(Star):
         self._stopping = False
         self._short_name_conflict = False
         self._owner: str | None = None
+        self._owner_candidate: str | None = None
+        self._released = False
+        self._stop_error = False
         self._poll_task: asyncio.Task[Any] | None = None
         self._config_digest: str | None = None
 
@@ -375,8 +397,10 @@ class CodexResetRadar(Star):
             if self._worker is not None:
                 try:
                     self._worker.stop()
-                except Exception:  # pragma: no cover - 退出路径不因单步失败而中断
-                    logger.warning("[codex-reset][main] worker.stop 异常", exc_info=True)
+                except Exception:
+                    # 不敢静默：`stop()` 若将来带上 flush/落盘语义，这里就是唯一线索
+                    logger.error("[codex-reset][main] worker.stop 异常", exc_info=True)
+                    self._stop_error = True
             self._poll_task = None
             tasks = list(self._tasks)
             self._tasks.clear()
@@ -394,19 +418,29 @@ class CodexResetRadar(Star):
         logger.info("[codex-reset][main] 已停止 tasks=%s", len(tasks))
 
     async def _release_runtime(self) -> None:
-        """写干净退出标记并关闭数据库（`terminate` 的 `finally` 分支）。"""
+        """写干净退出记录并关闭数据库（`terminate` 的 `finally` 分支，幂等）。
+
+        记录值带 owner 身份：只有「记录里的 owner 自己写的退出标记」才允许下一次启动
+        据此接管，避免只读实例的退出把持锁实例「洗白」成已退出（P1-04）。
+        """
         repo = self._repo
-        if repo is None:  # pragma: no cover - 初始化失败时可能为空
+        if repo is None or self._released:  # pragma: no cover - 初始化失败 / 重复调用
             return
+        identity = self._owner or self._owner_candidate
+        if identity is None:  # pragma: no cover - 理论上不可达
+            identity = f"{os.getpid()}:unknown"
         try:
-            # 干净退出标记：让下一次启动能区分「自己刚退出」与「另一个实例仍在跑」
-            await repo.meta_set(RUNTIME_SHUTDOWN_KEY, self.clock.utcnow().isoformat())
+            await repo.meta_set(
+                RUNTIME_SHUTDOWN_KEY, f"{identity}|{self.clock.utcnow().isoformat()}"
+            )
         except Exception:  # pragma: no cover - 退出路径不因写标记失败而中断
             logger.warning("[codex-reset][main] 写入 shutdown 标记失败", exc_info=True)
         try:
             await repo.close()
+            self._released = True
         except Exception:  # pragma: no cover
             logger.warning("[codex-reset][main] repo.close 异常", exc_info=True)
+            self._released = True
 
     # ------------------------------------------------------------------
     # 后台循环
@@ -473,6 +507,7 @@ class CodexResetRadar(Star):
         if repo is None:  # pragma: no cover - 调用点保证已初始化
             return
         owner = f"{os.getpid()}:{uuid4().hex[:8]}"
+        self._owner_candidate = owner
         spacing = max(1, int(self._plugin_settings.request_spacing_seconds))
         threshold = 2 * spacing
 
@@ -483,7 +518,7 @@ class CodexResetRadar(Star):
 
             if previous and previous != owner:
                 last = _parse_iso(heartbeat)
-                clean_exit = _parse_iso(shutdown_at)
+                clean_owner, clean_exit = _split_shutdown(shutdown_at)
                 same_process = previous.split(":", 1)[0] == str(os.getpid())
                 if same_process:
                     # 同进程内的插件热重载（如 WebUI 保存配置后框架重载插件）
@@ -491,7 +526,12 @@ class CodexResetRadar(Star):
                         "[codex-reset][main] 同进程重新加载插件（owner=%s），直接接管运行权",
                         previous,
                     )
-                elif last is not None and clean_exit is not None and clean_exit >= last:
+                elif (
+                    clean_owner == previous
+                    and last is not None
+                    and clean_exit is not None
+                    and clean_exit >= last
+                ):
                     logger.info(
                         "[codex-reset][main] 上一实例已干净退出（%s），接管运行权", shutdown_at
                     )
@@ -509,6 +549,9 @@ class CodexResetRadar(Star):
                         return
             self._owner = owner
             await tx.set(RUNTIME_OWNER_KEY, owner)
+            # 取得所有权时**同事务**写心跳：否则「owner 存在但心跳为空」会让下一个
+            # 实例落进 fail-open 分支（无心跳 → 判定不了 → 直接抢锁），两实例同时可写（P2-12）
+            await tx.set(RUNTIME_HEARTBEAT_KEY, self.clock.utcnow().isoformat())
             # 清掉上一次的退出标记，避免下一次启动把它当成「干净退出」的依据
             await tx.delete(RUNTIME_SHUTDOWN_KEY)
 
@@ -532,8 +575,14 @@ class CodexResetRadar(Star):
             return None
 
     async def _config_watch_loop(self) -> None:
-        """轮询配置文件摘要，变化即热更新；异常一律捕获，绝不冒泡。"""
+        """轮询配置文件摘要，变化即热更新；顺带刷新常驻心跳。异常一律捕获，绝不冒泡。"""
         while not self._stopping:
+            try:
+                await self._touch_heartbeat()
+            except asyncio.CancelledError:  # pragma: no cover - 上层取消
+                raise
+            except Exception:
+                logger.warning("[codex-reset][main] 心跳刷新失败", exc_info=True)
             try:
                 await self._reload_config_if_changed()
             except asyncio.CancelledError:  # pragma: no cover - 上层取消
@@ -544,6 +593,16 @@ class CodexResetRadar(Star):
                 await asyncio.sleep(POLL_TICK_SECONDS)
             except asyncio.CancelledError:  # pragma: no cover
                 raise
+
+    async def _touch_heartbeat(self) -> None:
+        """常驻心跳：`enable_monitor=false`（无采集轮次）时也要证明本实例还活着。
+
+        只由**持锁实例**写：只读实例写心跳等于对外宣称自己是 owner，会让真正的
+        owner 在下一次判定时把自己看成「另一个实例」的竞争者（P1-04 的镜像问题）。
+        """
+        if self._readonly or self._owner is None or self._repo is None or self._released:
+            return
+        await self._repo.meta_set(RUNTIME_HEARTBEAT_KEY, self.clock.utcnow().isoformat())
 
     async def _reload_config_if_changed(self) -> None:
         """读文件 → 比对摘要 → 解析 → 应用（间隔 / 卡片 / 采集任务开关）。"""
