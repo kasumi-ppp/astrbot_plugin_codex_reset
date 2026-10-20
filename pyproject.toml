@@ -1,0 +1,23 @@
+[project]
+name = "astrbot-plugin-codex-reset"
+version = "1.2.0"
+description = "AstrBot 插件：Codex 重置雷达（codex-reset.com 公开数据 → QQ 群通知）"
+requires-python = ">=3.12"
+authors = [{ name = "kasumi-ppp" }]
+license = { text = "AGPL-3.0" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [".git", "__pycache__", "docs", "data", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["services", "tests"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

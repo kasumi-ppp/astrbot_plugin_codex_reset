@@ -1,0 +1,27 @@
+{
+  "mode": "model",
+  "updated_at": "2026-10-20T12:00:00.000Z",
+  "probabilities": {
+    "rounded_24h": 9,
+    "rounded_48h": 15
+  },
+  "confidence": "low",
+  "last_reset_at": "2026-10-18T06:33:48.000Z",
+  "latest_alert": {
+    "id": "9000000000000000003",
+    "kind": "watch",
+    "state": "expired",
+    "source_at": "2026-10-18T09:00:00.000Z",
+    "summary": "Historic watch that never confirmed.",
+    "url": "https://x.com/thsottiaux/status/9000000000000000003",
+    "score": 40,
+    "window": {
+      "label": "3 AM - 6 AM UTC",
+      "start_at": "2026-10-18T03:00:00.000Z",
+      "end_at": "2026-10-18T06:00:00.000Z",
+      "time_zone": "UTC"
+    },
+    "pending": null,
+    "corrected": false
+  }
+}

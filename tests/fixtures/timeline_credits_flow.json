@@ -1,0 +1,62 @@
+{
+  "updated_at": "2026-10-20T10:19:48.808Z",
+  "events": [
+    {
+      "id": "2095651088502591861",
+      "date": "2026-09-03",
+      "type": "credits",
+      "group": "credits",
+      "summary": "Astra access compensation: one banked reset for every day without Astra on a paid ChatGPT plan, starting that day — the first drop promised about three hours later.",
+      "url": "https://x.com/thsottiaux/status/2095651088502591861",
+      "announced_at": "2026-09-03T23:12:09.000Z",
+      "effective_at": null,
+      "official_window": null,
+      "preview": false,
+      "scope": "global",
+      "confidence": "high",
+      "source": "archive",
+      "source_label": "Verified archive",
+      "reset_kind": "banked",
+      "banked_state": "announced",
+      "text": "Astra access compensation: one banked reset for every day without Astra on a paid ChatGPT plan, starting that day — the first drop promised about three hours later.",
+      "audience": [],
+      "incident_links": [],
+      "reason_tags": [
+        "launch",
+        "banked",
+        "compensation"
+      ],
+      "time_kind": "announcement / confirmation time",
+      "confirmed": true,
+      "banked_grant": true
+    },
+    {
+      "id": "2107975486798164736",
+      "date": "2026-10-07",
+      "type": "credits",
+      "group": "credits",
+      "summary": "The banked reset Tibo announced landed on our monitoring accounts.",
+      "url": null,
+      "announced_at": "2026-10-07T23:24:55.000Z",
+      "effective_at": null,
+      "official_window": null,
+      "preview": false,
+      "scope": "global",
+      "confidence": "high",
+      "source": "observed",
+      "source_label": "Observed on our monitoring accounts",
+      "reset_kind": "banked",
+      "banked_state": "available",
+      "text": "The banked reset Tibo announced landed on our monitoring accounts.",
+      "audience": [],
+      "incident_links": [],
+      "reason_tags": [
+        "banked"
+      ],
+      "time_kind": "announcement / confirmation time",
+      "observed_variant": "after_announcement",
+      "confirmed": true,
+      "banked_grant": false
+    }
+  ]
+}

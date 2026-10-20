@@ -1,0 +1,626 @@
+"""命令层测试：权限 / 限频 / 只读查询 / 配置双写（AC-15 / 16 / 21 / 22 + 子命令回显）。
+
+全部在假时钟与 SQLite 临时库上运行：不触网、不发真实 QQ 消息，
+断言的是「回复文本 + 数据库状态 + sink 调用」。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from conftest import (
+    SHANGHAI,
+    FakeClock,
+    create_subscription,
+    error_fetch,
+    make_pipeline,
+    mark_baseline_built,
+    ok_fetch,
+    open_repo,
+    reset_row,
+    run,
+    timeline_payload,
+    utc,
+)
+
+from services.commands import (
+    ADMIN_DENIED_TEXT,
+    GROUP_ONLY_TEXT,
+    GROUPS_PRIVATE_TEXT,
+    HISTORY_USAGE,
+    SET_USAGE,
+    CommandService,
+)
+from services.errors import ErrorCode
+from services.models import CommandRequest, GroupOverride, LogicalEvent
+from services.repository import Repository
+
+UMO = "aiocqhttp:GroupMessage:1001"
+PRIVATE_UMO = "aiocqhttp:FriendMessage:42"
+
+
+class FakeSink:
+    """记录 `sync_group` / `drop_group` 调用（模拟 WebUI 卡片写入）。"""
+
+    def __init__(self) -> None:
+        self.synced: list[str] = []
+        self.dropped: list[str] = []
+        self.should_fail = False
+
+    async def sync_group(self, sub: Any) -> bool:
+        """记录同步的 subscription_id。"""
+        self.synced.append(sub.subscription_id)
+        return not self.should_fail
+
+    async def drop_group(self, subscription_id: str) -> bool:
+        """记录被删除的 subscription_id。"""
+        self.dropped.append(subscription_id)
+        return not self.should_fail
+
+
+def _request(
+    subcommand: str = "status",
+    args: tuple[str, ...] = (),
+    *,
+    is_admin: bool = True,
+    is_group: bool = True,
+    umo: str = UMO,
+    group_id: str = "1001",
+    group_name: str = "测试群",
+    sender_id: str = "42",
+) -> CommandRequest:
+    """构造一个命令请求（`received_at=None` 让服务用假时钟）。"""
+    return CommandRequest(
+        umo=umo,
+        is_group=is_group,
+        group_id=group_id,
+        platform="aiocqhttp",
+        sender_id=sender_id,
+        is_admin=is_admin,
+        subcommand=subcommand,
+        args=tuple(args),
+        group_name=group_name,
+    )
+
+
+async def _boot(tmp_path: Path):
+    """建库 + 处理链 + 命令服务，时钟 05:00 起步（便于构造历史事件）。"""
+    clock = FakeClock(utc(2026, 10, 20, 5, 0))
+    repo = await open_repo(tmp_path, clock=clock)
+    bundle = make_pipeline(repo, clock)
+    sink = FakeSink()
+    service = CommandService(
+        repo=repo,
+        read=bundle.pipeline,
+        settings_provider=lambda: bundle.settings,
+        sink=sink,
+        clock=clock,
+        tz_provider=lambda: SHANGHAI,
+    )
+    return clock, repo, bundle, sink, service
+
+
+async def _seed_reset(repo: Repository, event_id: str, announced_at: str) -> None:
+    """直接入库一条已确认重置（用于 history / latest 断言）。"""
+    await repo.record_logical_event(
+        LogicalEvent(
+            logical_id=f"reset:{event_id}",
+            kind="reset",
+            group_kind="reset",
+            state_version="confirmed",
+            occurred_at=utc(2026, 10, 20, 11, 0),
+            payload={
+                "event_id": event_id,
+                "summary": f"事件 {event_id}",
+                "url": f"https://x.com/thsottiaux/status/{event_id}",
+                "occurred_at": announced_at,
+            },
+        ),
+        baseline=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-15：非管理员被拒但仍可查询
+# ---------------------------------------------------------------------------
+def test_non_admin_is_rejected_but_can_query(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, sink, service = await _boot(tmp_path)
+        try:
+            denied = await service.handle(_request("subscribe", is_admin=False))
+            assert ADMIN_DENIED_TEXT in denied.text
+            assert denied.error == "forbidden"
+            assert await repo.list_subscriptions() == []
+            assert sink.synced == []
+
+            status = await service.handle(_request("status", is_admin=False))
+            assert status.error is None
+            assert "监控开关" in status.text
+            assert "数据来源：https://codex-reset.com/" in status.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# AC-16：退订后零投递，且卡片被移除
+# ---------------------------------------------------------------------------
+def test_unsubscribe_stops_deliveries_and_drops_card(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, bundle, sink, service = await _boot(tmp_path)
+        try:
+            subscribed = await service.handle(_request("subscribe"))
+            assert "订阅成功" in subscribed.text
+            subscriptions = await repo.list_subscriptions()
+            assert len(subscriptions) == 1
+            assert sink.synced == [subscriptions[0].subscription_id]
+
+            clock.set_now(utc(2026, 10, 20, 12, 0))
+            await mark_baseline_built(repo, last_reset_at=utc(2026, 10, 20, 6, 0))
+            first = await bundle.pipeline.ingest(
+                "timeline",
+                ok_fetch(
+                    "timeline",
+                    timeline_payload(
+                        updated_at="2026-10-20T11:59:30Z",
+                        events=[reset_row("2112432076767289678", "2026-10-20T06:33:48Z")],
+                    ),
+                    fetched_at=utc(2026, 10, 20, 11, 59, 30),
+                    batch="b-16-1",
+                    checked_at=utc(2026, 10, 20, 11, 59, 30),
+                ),
+            )
+            assert first.deliveries_created == 1
+
+            clock.advance(6)  # 越过 unsubscribe 的 5s 限频
+            removed = await service.handle(_request("unsubscribe"))
+            assert "已取消订阅" in removed.text
+            assert sink.dropped == [subscriptions[0].subscription_id]
+            assert await repo.list_subscriptions() == []
+            # 级联删除未发送的投递
+            assert await repo.count_deliveries() == 0
+
+            clock.advance(10)
+            after = await bundle.pipeline.ingest(
+                "timeline",
+                ok_fetch(
+                    "timeline",
+                    timeline_payload(
+                        updated_at="2026-10-20T12:00:30Z",
+                        events=[reset_row("2109045392684032299", "2026-10-20T06:50:00Z")],
+                    ),
+                    fetched_at=utc(2026, 10, 20, 12, 0, 30),
+                    batch="b-16-2",
+                    checked_at=utc(2026, 10, 20, 12, 0, 30),
+                ),
+            )
+            assert after.deliveries_created == 0
+            assert await repo.count_deliveries() == 0
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# AC-22：/cr test 带「测试」标记、不入库、不建投递
+# ---------------------------------------------------------------------------
+def test_test_command_is_labelled_and_writes_nothing(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            reply = await service.handle(_request("test"))
+            assert "🧪【测试消息】" in reply.text
+            assert "测试" in reply.text
+            assert "数据来源：https://codex-reset.com/" in reply.text
+            assert await repo.count_deliveries() == 0
+            assert await repo.list_events(limit=10) == []
+
+            denied = await service.handle(_request("test", is_admin=False))
+            assert ADMIN_DENIED_TEXT in denied.text
+            assert denied.error == "forbidden"
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# 限频：命中即回剩余秒数，且绝不触发上游请求（AC-21）
+# ---------------------------------------------------------------------------
+def test_rate_limit_blocks_repeat_and_never_fetches(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, bundle, _sink, service = await _boot(tmp_path)
+        try:
+            first = await service.handle(_request("status"))
+            assert first.error is None
+            second = await service.handle(_request("status"))
+            assert second.error == "rate_limited"
+            assert "请等待" in second.text and "秒后再试" in second.text
+            assert bundle.client.calls == []
+
+            clock.advance(15)
+            third = await service.handle(_request("status"))
+            assert third.error is None
+            assert bundle.client.calls == []
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# /cr set：越界拒绝、合法写入、群覆盖来源回显
+# ---------------------------------------------------------------------------
+def test_set_rejects_out_of_range_threshold(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            clock.advance(6)  # set 限频 5s
+            reply = await service.handle(_request("set", ("p24", "101")))
+            assert "0-100" in reply.text
+            assert "拒绝" in reply.text
+            assert sink.synced  # 订阅时已同步过一次
+
+            row = await repo.get_subscription(UMO)
+            assert row is not None
+            assert row.override.threshold_24h is None  # 非法值不落库
+
+            clock.advance(6)
+            bad_unit = await service.handle(_request("set", ("p24",)))
+            assert bad_unit.text.startswith(SET_USAGE)
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_set_updates_override_and_marks_group_source(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            before = len(sink.synced)
+            clock.advance(6)
+
+            toggled = await service.handle(_request("set", ("reset", "off")))
+            assert "已更新" in toggled.text
+            assert "群覆盖" in toggled.text
+            assert len(sink.synced) == before + 1
+
+            row = await repo.get_subscription(UMO)
+            assert row is not None
+            assert row.override.enable_confirmed_reset is False
+
+            clock.advance(6)
+            threshold = await service.handle(_request("set", ("p24", "65")))
+            assert "65%" in threshold.text
+
+            clock.advance(6)
+            settings = await service.handle(_request("settings"))
+            assert "确认重置：关闭（群覆盖）" in settings.text
+            assert "24h 阈值：65%（群覆盖）" in settings.text
+            assert "48h 阈值：70%（全局默认）" in settings.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_set_back_to_default_clears_override(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            clock.advance(6)
+            await service.handle(_request("set", ("reset", "off")))
+            clock.advance(6)
+            back = await service.handle(_request("set", ("reset", "on")))
+            assert "已更新" in back.text
+            row = await repo.get_subscription(UMO)
+            assert row is not None
+            assert row.override.enable_confirmed_reset is None  # 回到「继承全局默认」
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# /cr history：默认 3、上限 10、非法参数提示
+# ---------------------------------------------------------------------------
+def test_history_truncates_and_rejects_invalid_arguments(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            for index in range(12):
+                await _seed_reset(repo, f"event-{index:02d}", "2026-10-20T11:00:00Z")
+
+            truncated = await service.handle(_request("history", ("99",)))
+            assert "最近 10 条确认重置" in truncated.text
+            assert "（仅显示最近 10 条）" in truncated.text
+
+            clock.advance(16)
+            invalid = await service.handle(_request("history", ("abc",)))
+            assert invalid.text.startswith(HISTORY_USAGE)
+
+            clock.advance(16)
+            zero = await service.handle(_request("history", ("0",)))
+            assert zero.text.startswith(HISTORY_USAGE)
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# /cr groups：群内提示私聊；私聊返回健康表
+# ---------------------------------------------------------------------------
+def test_groups_requires_private_chat(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            in_group = await service.handle(_request("groups"))
+            assert in_group.text.startswith(GROUPS_PRIVATE_TEXT)
+
+            await service.handle(_request("subscribe"))
+            clock.advance(11)  # groups 限频 10s
+            private = await service.handle(
+                _request(
+                    "groups",
+                    is_group=False,
+                    umo=PRIVATE_UMO,
+                    group_id="",
+                )
+            )
+            assert "订阅群与推送健康" in private.text
+            assert "测试群" in private.text
+            assert "uncertain" in private.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# /cr subscribe：私聊被拒、重复订阅回显、群上限
+# ---------------------------------------------------------------------------
+def test_subscribe_from_private_chat_is_rejected(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _clock, repo, _bundle, sink, service = await _boot(tmp_path)
+        try:
+            reply = await service.handle(
+                _request("subscribe", is_group=False, umo=PRIVATE_UMO, group_id="")
+            )
+            assert reply.text.startswith(GROUP_ONLY_TEXT)
+            assert await repo.list_subscriptions() == []
+            assert sink.synced == []
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_subscribe_again_echoes_existing_settings(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            clock.advance(6)  # subscribe 限频 5s
+            again = await service.handle(_request("subscribe"))
+            assert "本群已订阅" in again.text
+            assert len(await repo.list_subscriptions()) == 1
+            assert len(sink.synced) == 1  # 重复订阅不再写卡片
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# 帮助 / 未知子命令 / 只读命令
+# ---------------------------------------------------------------------------
+def test_help_and_unknown_subcommand_are_self_explanatory(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            help_reply = await service.handle(_request("help", is_admin=False))
+            assert "/codexreset" in help_reply.text
+            assert "/cr set" in help_reply.text
+            assert "仅管理员" not in help_reply.text  # 帮助本身对所有人开放
+            assert "数据来源：https://codex-reset.com/" in help_reply.text
+
+            unknown = await service.handle(_request("nope", is_admin=False))
+            assert "未知子命令：nope" in unknown.text
+            assert "/cr help" in unknown.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_query_commands_read_only_cache(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, bundle, _sink, service = await _boot(tmp_path)
+        try:
+            empty = await service.handle(_request("forecast"))
+            assert "暂无数据" in empty.text
+
+            await bundle.pipeline.ingest(
+                "forecast",
+                ok_fetch(
+                    "forecast",
+                    {
+                        "updated_at": "2026-10-20T11:59:00Z",
+                        "probabilities": {"rounded_24h": 55, "rounded_48h": 72},
+                        "confidence": "medium",
+                        "last_reset_at": None,
+                        "latest_alert": None,
+                    },
+                    fetched_at=utc(2026, 10, 20, 11, 59),
+                    batch="b-q",
+                    checked_at=utc(2026, 10, 20, 11, 59),
+                ),
+            )
+            await _seed_reset(repo, "2112432076767289678", "2026-10-20T11:00:00Z")
+            clock.advance(20)
+            forecast = await service.handle(_request("forecast"))
+            assert "未来 24 小时：55%" in forecast.text
+            assert "未来 48 小时：72%" in forecast.text
+            assert "置信度：中" in forecast.text
+            assert "实验性" in forecast.text
+
+            clock.advance(20)
+            latest = await service.handle(_request("latest"))
+            assert "最近一次已确认重置" in latest.text
+
+            clock.advance(20)
+            credits = await service.handle(_request("credits"))
+            assert "额外重置权益" in credits.text
+            assert bundle.client.calls == []  # 全程零上游请求
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_stale_data_appends_warning_line(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            # 只重建缓存、不写库：直接构造一个「无快照」的读模型状态
+            reply = await service.handle(_request("status"))
+            assert "⚠️ 数据可能已过时" in reply.text
+            await _seed_reset(repo, "2112432076767289678", "2026-10-20T11:00:00Z")
+            clock.advance(20)
+            forecast = await service.handle(_request("forecast"))
+            assert "⚠️ 数据可能已过时" in forecast.text
+            assert forecast.text.startswith("暂无数据")
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_audit_records_admin_actions(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            await service.handle(_request("subscribe", is_admin=False))
+            files = list(repo.audit_dir.glob("audit-*.jsonl"))
+            assert len(files) == 1
+            lines = files[0].read_text(encoding="utf-8").splitlines()
+            assert any('"action": "subscribe"' in line for line in lines)
+            assert any('"forbidden"' in line for line in lines)
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_override_default_is_inherited_when_subscribing(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            row = await repo.get_subscription(UMO)
+            assert row is not None
+            assert row.override == GroupOverride()  # 订阅不写任何覆盖
+            settings = await service.handle(_request("settings"))
+            assert "（全局默认）" in settings.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_subscribe_is_blocked_at_group_limit(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        from services.models import PluginSettings
+
+        clock = FakeClock(utc(2026, 10, 20, 5, 0))
+        repo = await open_repo(tmp_path, clock=clock)
+        bundle = make_pipeline(repo, clock, settings=PluginSettings(group_limit=1))
+        service = CommandService(
+            repo=repo,
+            read=bundle.pipeline,
+            settings_provider=lambda: bundle.settings,
+            sink=FakeSink(),
+            clock=clock,
+            tz_provider=lambda: SHANGHAI,
+        )
+        try:
+            await create_subscription(repo, umo="aiocqhttp:GroupMessage:9999", group_id="9999")
+            reply = await service.handle(_request("subscribe"))
+            assert "群上限" in reply.text
+            assert len(await repo.list_subscriptions()) == 1
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# P2-05：`/cr status` 必须能诊断「基线未建立」「forecast 端点失败」
+# ---------------------------------------------------------------------------
+def test_status_reports_missing_baseline(tmp_path: Path) -> None:
+    """基线未建立时自动通知整体暂缓，必须在 status 里说出来（否则现象是「永久零通知」）。"""
+
+    async def scenario() -> None:
+        clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            reply = await service.handle(_request("status"))
+            assert "⚠️ 基线尚未建立（timeline 未成功采集），自动通知暂缓。" in reply.text
+            assert "forecast 端点最近采集失败" not in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_status_reports_forecast_endpoint_failure(tmp_path: Path) -> None:
+    """基线已建立但 forecast 最近失败 → 追加一行诊断（概率与 Watch 可能不更新）。"""
+
+    async def scenario() -> None:
+        clock, repo, bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await mark_baseline_built(repo)
+            await bundle.pipeline.ingest(
+                "forecast", error_fetch("forecast", ErrorCode.HTTP_5XX, status=502)
+            )
+            reply = await service.handle(_request("status"))
+            assert "基线尚未建立" not in reply.text
+            assert "⚠️ forecast 端点最近采集失败，概率与 Watch 可能不更新。" in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_status_has_no_diagnostic_lines_when_healthy(tmp_path: Path) -> None:
+    """健康状态下不得出现任何降级行（避免狼来了）。"""
+
+    async def scenario() -> None:
+        clock, repo, bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await mark_baseline_built(repo)
+            await bundle.pipeline.ingest(
+                "forecast",
+                ok_fetch(
+                    "forecast",
+                    {"updated_at": "2026-10-20T04:59:00Z", "probabilities": {"rounded_24h": 10,
+                                                                           "rounded_48h": 20}},
+                    fetched_at=clock.utcnow(),
+                ),
+            )
+            reply = await service.handle(_request("status"))
+            assert "⚠️ 基线" not in reply.text
+            assert "forecast 端点最近采集失败" not in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())

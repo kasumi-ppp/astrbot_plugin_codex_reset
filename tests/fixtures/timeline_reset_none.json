@@ -1,0 +1,27 @@
+{
+  "updated_at": "2026-10-20T10:19:48.808Z",
+  "events": [
+    {
+      "id": "2111492673890824348",
+      "date": "2026-10-17",
+      "type": "reset",
+      "group": "reset",
+      "summary": "Day 13/ Le limit reset https://t.co/zXd2DIH5xf",
+      "url": "https://x.com/thsottiaux/status/2111492673890824348",
+      "announced_at": "2026-10-17T16:20:57.000Z",
+      "effective_at": null,
+      "official_window": null,
+      "preview": false,
+      "scope": "global",
+      "confidence": "medium",
+      "source": "live",
+      "source_label": "Live radar feed",
+      "reset_kind": null,
+      "announcement_state": "none",
+      "observation_result": "unknown",
+      "time_kind": "announcement / confirmation time",
+      "confirmed": false,
+      "banked_grant": false
+    }
+  ]
+}

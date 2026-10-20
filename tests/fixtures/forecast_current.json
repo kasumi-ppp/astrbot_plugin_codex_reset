@@ -1,0 +1,179 @@
+{
+  "mode": "model",
+  "updated_at": "2026-10-20T10:19:48.712Z",
+  "probabilities": {
+    "raw_24h": 0.21831990584656782,
+    "raw_48h": 0.3889762304042814,
+    "rounded_24h": 22,
+    "rounded_48h": 39,
+    "model_24h": 22,
+    "model_48h": 39,
+    "tease_tier": null,
+    "tease_floor_24h": null,
+    "tease_floor_48h": null,
+    "commitment": null,
+    "commitment_floor_percent": null,
+    "signal_percent": null,
+    "range_24h": {
+      "lower": 0.116,
+      "upper": 0.372
+    },
+    "range_48h": {
+      "lower": 0.251,
+      "upper": 0.547
+    }
+  },
+  "signal_score": null,
+  "confidence": "low",
+  "confidence_note": "Experimental: walk-forward backtest has not beaten both baselines yet.",
+  "last_reset_at": "2026-10-20T06:33:48.000Z",
+  "age_days": 0.2,
+  "official_signal": null,
+  "teased_window": null,
+  "time_window": {
+    "start_hour": 3,
+    "end_hour": 6,
+    "label": "3 AM - 6 AM",
+    "timezone": "UTC"
+  },
+  "cadence": {
+    "recent_median_days": 2.4,
+    "recent_sample": 5,
+    "weighted_mean_days": 4.6,
+    "accelerating": true
+  },
+  "tease_signal": null,
+  "tease_card_note": null,
+  "tease_post_age": null,
+  "latest_hint": null,
+  "hint_copy": null,
+  "context": {
+    "window_days": 7,
+    "since": "2026-10-13T10:19:48.712Z",
+    "evidence_ids": [
+      "2112432076767289678",
+      "2111918635849801739",
+      "2111492673890824348",
+      "2110951585983631505"
+    ],
+    "effect": "informational_only",
+    "multiplier": 1,
+    "negative_supported": false,
+    "state": "QUIET",
+    "since_reset": true,
+    "reset_at": "2026-10-20T06:33:48.000Z",
+    "primary_post": null
+  },
+  "context_copy": {
+    "en": "Tibo, last 7 days: no new hint since the reset on Oct 20. The number above is history only.",
+    "zh": "Tibo 近 7 天：10 月 20 日重置之后没有新线索。上面的概率只来自历史。",
+    "ja": "Tibo 直近 7 日：10月20日のリセット後、新しい手がかりはありません。上の確率は履歴のみに基づきます。",
+    "es": "Tibo, últimos 7 días: sin pistas nuevas desde el reset del 20 de oct. El número de arriba es solo historial."
+  },
+  "wait_comparison": {
+    "sample": 8,
+    "wait_days": 0.2,
+    "shorter_share": 0,
+    "median_days": 3.3,
+    "mean_days": 4.7,
+    "longest_days": 14.4,
+    "position": "earlier_than_most",
+    "basis": "recent_completed_intervals",
+    "window_intervals": 8,
+    "sample_end_at": "2026-10-20T06:33:48.000Z"
+  },
+  "wait_copy": {
+    "en": "You have waited 0.2 days; 0% of the latest 8 completed reset intervals were shorter. Typical wait 3.3 days, average 4.7, longest 14.4. Recent history, not a schedule. This historical baseline uses up to 8 completed intervals. Ordinary posts and hints are not extra probability factors. Sample through 2026-10-20 06:33:48 UTC.",
+    "zh": "你已等了 0.2 天；最近 8 个完整重置间隔中，0% 短于当前等待。典型间隔 3.3 天，平均 4.7 天，最长 14.4 天。这是近期历史，不是倒计时。历史基准概率使用最近最多 8 个完整间隔，普通推文和暗示未作为额外概率因子。样本截至 2026-10-20 06:33:48 UTC。",
+    "ja": "待ち始めて 0.2 日。直近 8 件の完了したリセット間隔の 0% は、現在の待ち時間より短いものでした。典型 3.3 日、平均 4.7 日、最長 14.4 日。直近の記録であり、予定表ではありません。履歴ベースの確率には直近最大 8 件の完了した間隔を使います。通常の投稿や示唆は追加の確率要因に含めません。サンプルは 2026-10-20 06:33:48 UTC 時点。",
+    "es": "Llevas 0,2 días esperando; el 0 % de los últimos 8 intervalos completos entre reinicios fueron más cortos. Espera típica 3,3 días, media 4,7, la más larga 14,4. Es historia reciente, no un calendario. Esta probabilidad histórica base usa hasta 8 intervalos completos recientes. Los mensajes habituales y las insinuaciones no son factores adicionales de probabilidad. Muestra hasta el 2026-10-20 06:33:48 UTC."
+  },
+  "wait_token": {
+    "en": "wait 0.2d · last 8: 0% shorter",
+    "zh": "已等 0.2 天 · 近8次 0%更短",
+    "ja": "待ち0.2日 · 直近8件 0%が短い",
+    "es": "espera 0,2 d · últ. 8: 0% más cortas"
+  },
+  "model_token": null,
+  "range_aria": {
+    "en": {
+      "h24": "Reset chance in the next 24 hours: 22%, range 12–37%",
+      "h48": "Reset chance by 48 hours: 39%, range 25–55%"
+    },
+    "zh": {
+      "h24": "未来 24 小时重置概率：22%，区间 12–37%",
+      "h48": "48 小时内重置概率：39%，区间 25–55%"
+    },
+    "ja": {
+      "h24": "今後 24 時間のリセット確率：22%、範囲 12–37%",
+      "h48": "48 時間以内のリセット確率：39%、範囲 25–55%"
+    },
+    "es": {
+      "h24": "Probabilidad de reset en las próximas 24 horas: 22 %, rango 12–37 %",
+      "h48": "Probabilidad de reset en 48 horas: 39 %, rango 25–55 %"
+    }
+  },
+  "milestone_watch": null,
+  "evidence": [
+    {
+      "code": "recent_cadence",
+      "params": {
+        "recent_median_days": 2.4,
+        "recent_sample": 5,
+        "weighted_mean_days": 4.6
+      },
+      "label": "Recent cadence",
+      "detail": "a reset every ~2.4d across the last 5 (weighted mean 4.6d)",
+      "href": "/timeline"
+    },
+    {
+      "code": "last_reset",
+      "params": {
+        "date": "2026-10-20",
+        "age_days": 0.2
+      },
+      "label": "Last reset",
+      "detail": "2026-10-20 (0.2d ago)",
+      "href": "https://x.com/thsottiaux/status/2112432076767289678"
+    },
+    {
+      "code": "common_window",
+      "params": {
+        "window_label": "3 AM - 6 AM",
+        "timezone": "UTC"
+      },
+      "label": "Most common window",
+      "detail": "3 AM - 6 AM in UTC",
+      "href": "/timeline"
+    }
+  ],
+  "model": {
+    "version": "rate-v3",
+    "window_intervals": 8,
+    "half_life_days": 60,
+    "effective_sample_size": 33.5,
+    "base_daily_rate": 0.218
+  },
+  "backtest": {
+    "sample_size": 359,
+    "brier": 0.126,
+    "baseline_brier": 0.128,
+    "rate_v2_brier": 0.125,
+    "better_than_naive": true,
+    "better_than_rate_v2": false,
+    "status": "experimental"
+  },
+  "signal_tier": null,
+  "alert_event_id": null,
+  "latest_alert": {
+    "id": "2112432076767289678",
+    "kind": "reset",
+    "state": "confirmed",
+    "source_at": "2026-10-20T06:33:48.000Z",
+    "summary": "Day 15/ Nevermind, we're still cooking... and reset. Enjoy. https://t.co/RZ9WhtI802",
+    "url": "https://x.com/thsottiaux/status/2112432076767289678",
+    "score": null,
+    "window": null,
+    "corrected": false
+  }
+}

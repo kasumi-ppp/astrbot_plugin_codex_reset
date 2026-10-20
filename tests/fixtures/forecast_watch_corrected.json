@@ -1,0 +1,27 @@
+{
+  "mode": "model",
+  "updated_at": "2026-10-20T12:30:00.000Z",
+  "probabilities": {
+    "rounded_24h": 11,
+    "rounded_48h": 18
+  },
+  "confidence": "low",
+  "last_reset_at": "2026-10-20T06:33:48.000Z",
+  "latest_alert": {
+    "id": "9000000000000000001",
+    "kind": "watch",
+    "state": "active",
+    "source_at": "2026-10-20T11:00:00.000Z",
+    "summary": "Correction: the earlier window no longer applies.",
+    "url": "https://x.com/thsottiaux/status/9000000000000000001",
+    "score": 30,
+    "window": {
+      "label": "20:00 - 22:00 Asia/Shanghai",
+      "start_at": "2026-10-21T12:00:00.000Z",
+      "end_at": "2026-10-21T14:00:00.000Z",
+      "time_zone": "Asia/Shanghai"
+    },
+    "pending": null,
+    "corrected": true
+  }
+}

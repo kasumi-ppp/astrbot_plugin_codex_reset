@@ -1,0 +1,27 @@
+{
+  "updated_at": "2026-10-20T10:19:48.808Z",
+  "events": [
+    {
+      "id": "2109045392684032299",
+      "date": "2026-10-11",
+      "type": "reset",
+      "group": "reset",
+      "summary": "Global reset by EOD. May the tokens do good things for you.",
+      "url": "https://x.com/thsottiaux/status/2109045392684032299",
+      "announced_at": "2026-10-11T03:57:51.000Z",
+      "effective_at": null,
+      "official_window": null,
+      "preview": false,
+      "scope": "global",
+      "confidence": "medium",
+      "source": "operator-observed",
+      "source_label": "Operator observation; awaiting Tibo",
+      "reset_kind": null,
+      "announcement_state": "announced",
+      "observation_result": "reset_observed",
+      "time_kind": "announcement / confirmation time",
+      "confirmed": false,
+      "banked_grant": false
+    }
+  ]
+}

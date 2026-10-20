@@ -1,0 +1,52 @@
+{
+  "updated_at": "2026-10-20T10:19:48.808Z",
+  "events": [
+    {
+      "id": "2105008012525769969",
+      "date": "2026-10-09",
+      "type": "credits",
+      "group": "credits",
+      "summary": "Banked reset mentioned without a measurable state.",
+      "url": null,
+      "announced_at": "2026-10-09T12:00:00.000Z",
+      "effective_at": null,
+      "official_window": null,
+      "preview": false,
+      "scope": "global",
+      "confidence": "low",
+      "source": "unknown",
+      "source_label": "Unverified",
+      "reset_kind": "banked",
+      "banked_state": "unknown",
+      "text": "Banked reset mentioned without a measurable state.",
+      "audience": [],
+      "incident_links": [],
+      "reason_tags": ["banked"],
+      "confirmed": true,
+      "banked_grant": true
+    },
+    {
+      "id": "2105008012525769970",
+      "date": "2026-10-10",
+      "type": "credits",
+      "group": "credits",
+      "summary": "Banked state missing entirely.",
+      "url": null,
+      "announced_at": "2026-10-10T12:00:00.000Z",
+      "effective_at": null,
+      "official_window": null,
+      "preview": false,
+      "scope": "global",
+      "confidence": "low",
+      "source": "unknown",
+      "source_label": "Unverified",
+      "reset_kind": "banked",
+      "text": "Banked state missing entirely.",
+      "audience": [],
+      "incident_links": [],
+      "reason_tags": ["banked"],
+      "confirmed": true,
+      "banked_grant": true
+    }
+  ]
+}

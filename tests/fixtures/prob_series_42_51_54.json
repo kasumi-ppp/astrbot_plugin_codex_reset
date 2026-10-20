@@ -1,0 +1,10 @@
+{
+  "confidence": "low",
+  "note": "AC-09 采样序列：42 未达标 → 51 第 1 次 → 54 触发；第 4 个样本处于冷却期。",
+  "series": [
+    { "updated_at": "2026-10-20T10:00:00.000Z", "rounded_24h": 42, "rounded_48h": 60 },
+    { "updated_at": "2026-10-20T10:05:00.000Z", "rounded_24h": 51, "rounded_48h": 60 },
+    { "updated_at": "2026-10-20T10:10:00.000Z", "rounded_24h": 54, "rounded_48h": 60 },
+    { "updated_at": "2026-10-20T10:15:00.000Z", "rounded_24h": 54, "rounded_48h": 60 }
+  ]
+}

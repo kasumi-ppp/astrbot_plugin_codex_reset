@@ -1,0 +1,181 @@
+{
+  "enable_monitor": {
+    "description": "总开关：是否启用后台采集（关闭后仍会消化已有投递队列，查询只读缓存）",
+    "type": "bool",
+    "default": true
+  },
+  "enable_confirmed_reset": {
+    "description": "推送「全球重置已确认」通知",
+    "type": "bool",
+    "default": true
+  },
+  "enable_watch": {
+    "description": "推送「重置提前预警」（网站 Watch 信号）",
+    "type": "bool",
+    "default": true
+  },
+  "enable_forecast": {
+    "description": "推送「重置概率预测」（实验性模型）",
+    "type": "bool",
+    "default": true
+  },
+  "enable_credits": {
+    "description": "推送「额外重置权益」动态",
+    "type": "bool",
+    "default": true
+  },
+  "threshold_24h": {
+    "description": "未来 24 小时概率提醒阈值（%），0 表示关闭该窗口",
+    "type": "int",
+    "default": 50,
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "threshold_48h": {
+    "description": "未来 48 小时概率提醒阈值（%），0 表示关闭该窗口",
+    "type": "int",
+    "default": 70,
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "forecast_confirm_samples": {
+    "description": "概率提醒需要连续达标的采样次数（至少 2）",
+    "type": "int",
+    "default": 2
+  },
+  "forecast_cooldown_hours": {
+    "description": "同一群两条概率提醒之间的最短间隔（小时）",
+    "type": "int",
+    "default": 12
+  },
+  "forecast_daily_max_per_group": {
+    "description": "同一群每个自然日最多推送几条概率提醒",
+    "type": "int",
+    "default": 2
+  },
+  "time_zone": {
+    "description": "消息时间显示使用的 IANA 时区",
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "hint": "填写 IANA 时区名，例如 Asia/Shanghai（北京时间）、UTC；非法值会回落 Asia/Shanghai 并告警"
+  },
+  "request_spacing_seconds": {
+    "description": "两次上游请求之间的最小间隔（秒），用于遵守站点礼貌访问",
+    "type": "int",
+    "default": 60,
+    "slider": {
+      "min": 60,
+      "max": 600,
+      "step": 10
+    }
+  },
+  "max_source_age_minutes": {
+    "description": "源数据超过该分钟数视为陈旧：仍入库但不推送",
+    "type": "int",
+    "default": 10
+  },
+  "max_catchup_hours": {
+    "description": "启动补发摘要回溯的小时数",
+    "type": "int",
+    "default": 6
+  },
+  "enable_catchup": {
+    "description": "启动时补发最近遗漏的确认重置与权益变化（每群最多 1 条摘要）",
+    "type": "bool",
+    "default": false
+  },
+  "allow_at_all": {
+    "description": "确认重置时尝试 @全体成员（仅 aiocqhttp 平台生效）",
+    "type": "bool",
+    "default": false
+  },
+  "show_source_link": {
+    "description": "是否显示数据来源署名行",
+    "type": "bool",
+    "default": true,
+    "hint": "数据来源署名不可关闭（许可要求）"
+  },
+  "admin_only_subscription": {
+    "description": "订阅管理仅限 AstrBot 管理员（V1.2 固定为 true，预留字段）",
+    "type": "bool",
+    "default": true
+  },
+  "group_overrides": {
+    "description": "群级通知配置（由 /cr subscribe 与 /cr set 自动维护，请勿手工新增条目）",
+    "type": "template_list",
+    "default": [],
+    "hint": "修改后会在插件下次启动时同步进数据库；数据库始终是唯一真源",
+    "templates": {
+      "group_card": {
+        "name": "群配置",
+        "display_item": "group_name",
+        "items": {
+          "subscription_id": {
+            "description": "订阅唯一标识（自动生成）",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "group_name": {
+            "description": "群名（订阅时尽力获取）",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "_version": {
+            "description": "配置版本号（用于检测卡片是否过期）",
+            "type": "int",
+            "default": 1,
+            "invisible": true
+          },
+          "enable_confirmed_reset": {
+            "description": "该群接收「重置已确认」",
+            "type": "bool",
+            "default": true
+          },
+          "enable_watch": {
+            "description": "该群接收「提前预警」",
+            "type": "bool",
+            "default": true
+          },
+          "enable_forecast": {
+            "description": "该群接收「概率预测」",
+            "type": "bool",
+            "default": true
+          },
+          "enable_credits": {
+            "description": "该群接收「额外权益动态」",
+            "type": "bool",
+            "default": true
+          },
+          "threshold_24h": {
+            "description": "该群 24h 概率阈值（%）",
+            "type": "int",
+            "default": 50,
+            "slider": {
+              "min": 0,
+              "max": 100,
+              "step": 1
+            }
+          },
+          "threshold_48h": {
+            "description": "该群 48h 概率阈值（%）",
+            "type": "int",
+            "default": 70,
+            "slider": {
+              "min": 0,
+              "max": 100,
+              "step": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

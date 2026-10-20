@@ -1,0 +1,24 @@
+{
+  "updated_at": "2026-10-20T10:19:48.712Z",
+  "confidence": "ultra",
+  "probabilities": {
+    "rounded_24h": 22,
+    "rounded_48h": 39
+  },
+  "stale": "maybe",
+  "fetched_at": "2026-10-20T10:19:12.979Z",
+  "events": [
+    {
+      "id": "9000000000000000009",
+      "date": "2026-10-21",
+      "type": "reset",
+      "group": "weird",
+      "summary": "unknown enum row",
+      "url": "javascript:alert(1)",
+      "announcement_state": "announced",
+      "confirmed": true,
+      "banked_grant": false,
+      "banked_state": "quantum"
+    }
+  ]
+}
