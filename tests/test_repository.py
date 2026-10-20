@@ -844,3 +844,65 @@ def test_logical_kind_time_index_exists(repo: Repository) -> None:
     finally:
         conn.close()
     assert "idx_logical_kind_time" in indexes
+
+
+# ---------------------------------------------------------------------------
+# P2-09 / P2-11：history 过滤降级更正、原子抢占
+# ---------------------------------------------------------------------------
+def test_list_events_excludes_downgraded_corrections(repo: Repository) -> None:
+    """P2-09：降级更正与确认重置同为 `group_kind="reset"`，必须能显式排除。
+
+    站点把某条 reset 降级时，`reset_corrections` 写的更正事件 group_kind 仍是
+    `reset`（`state_version="downgraded:announced"`）；`/cr history` 若不排除，
+    就会把「已撤回」当成「已确认」展示给用户。
+    """
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        await repo.record_logical_event(
+            make_logical_event("reset:real", occurred_at=utc(2026, 10, 20, 6, 33)), baseline=False
+        )
+        await repo.record_logical_event(
+            make_logical_event(
+                "reset:revoked",
+                state_version="downgraded:announced",
+                occurred_at=utc(2026, 10, 20, 13, 0),
+            ),
+            baseline=False,
+        )
+        raw = await repo.list_events(group_kind="reset", limit=10)
+        filtered = await repo.list_events(group_kind="reset", limit=10, exclude_corrections=True)
+        return [e.logical_id for e in raw], [e.logical_id for e in filtered]
+
+    raw, filtered = run(scenario())
+
+    assert raw == ["reset:revoked", "reset:real"], "未过滤时应按时间倒序包含更正行"
+    assert filtered == ["reset:real"], "过滤后只应剩下真正确认的重置"
+
+
+def test_atomic_meta_rolls_back_on_exception(repo: Repository) -> None:
+    """P2-11：`atomic_meta()` 内抛异常必须整体回滚，不得留下半写状态。"""
+
+    async def scenario() -> str | None:
+        with pytest.raises(RuntimeError):
+            async with repo.atomic_meta() as tx:
+                await tx.set("runtime:owner", "999999:deadbeef")
+                raise RuntimeError("模拟判定中途失败")
+        return await repo.meta_get("runtime:owner")
+
+    assert run(scenario()) is None
+
+
+def test_atomic_meta_reads_see_writes_of_same_transaction(repo: Repository) -> None:
+    """P2-11：同一事务内的读必须看见本事务已写的值（读-判定-写在同一条链上）。"""
+
+    async def scenario() -> tuple[str | None, bool]:
+        async with repo.atomic_meta() as tx:
+            await tx.set("runtime:owner", "111:aaaa")
+            seen = await tx.get("runtime:owner")
+            deleted = await tx.delete("runtime:owner")
+            gone = await tx.get("runtime:owner")
+        return seen, deleted and gone is None
+
+    seen, checked = run(scenario())
+    assert seen == "111:aaaa"
+    assert checked is True

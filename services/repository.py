@@ -122,6 +122,40 @@ def _hash_umo(umo: str) -> str:
     return hashlib.sha1(umo.encode("utf-8")).hexdigest()[:8]
 
 
+class MetaView:
+    """`atomic_meta()` 产出的事务内 meta 视图（只暴露 `get/set/delete`）。
+
+    所有操作复用同一个 `aiosqlite.Connection`，因此与调用方共享同一个
+    `BEGIN IMMEDIATE` 事务；`MetaView` 自身不开事务，避免二次获取写锁。
+    """
+
+    __slots__ = ("_clock", "_conn")
+
+    def __init__(self, conn: aiosqlite.Connection, clock: Clock) -> None:
+        self._conn = conn
+        self._clock = clock
+
+    async def get(self, key: str) -> str | None:
+        """读取单键（事务内可见的已提交值）。"""
+        cursor = await self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        await cursor.close()
+        return None if row is None else str(row["value"])
+
+    async def set(self, key: str, value: str) -> None:
+        """写入单键（UPSERT）。"""
+        await self._conn.execute(
+            "INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, _to_iso(self._clock.utcnow())),
+        )
+
+    async def delete(self, key: str) -> bool:
+        """删除单键，返回是否命中。"""
+        cursor = await self._conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+        return cursor.rowcount > 0
+
+
 class Repository:
     """六表持久层。生命周期：`open()` → 业务调用 → `close()`。"""
 
@@ -273,6 +307,20 @@ class Repository:
         async with self._tx() as conn:
             cursor = await conn.execute("DELETE FROM meta WHERE key = ?", (key,))
             return cursor.rowcount > 0
+
+    @asynccontextmanager
+    async def atomic_meta(self) -> AsyncIterator[MetaView]:
+        """把「读 → 判定 → 写」收进**一个** `BEGIN IMMEDIATE` 事务。
+
+        软单实例的抢占必须原子：先 `meta_get` 再 `meta_set` 的话，两个实例会
+        各自读到「无主」快照、双双认定自己持锁（P2-11）。本上下文在退出时统一
+        commit，异常则 rollback。
+
+        注意：事务内**禁止**再调用 `meta_set`/`meta_delete`（会二次获取写锁而自锁），
+        一律走 `MetaView.set/delete`。
+        """
+        async with self._tx() as conn:
+            yield MetaView(conn, self._clock)
 
     # ------------------------------------------------------------------
     # 快照
@@ -695,20 +743,33 @@ class Repository:
         await cursor.close()
         return None if row is None else self._logical_from_row(row)
 
-    async def list_events(self, *, group_kind: str | None = None, limit: int = 10) -> list[LogicalEvent]:
-        """按发生时间倒序列出逻辑事件（`/cr history` 等只读命令使用）。"""
+    async def list_events(
+        self,
+        *,
+        group_kind: str | None = None,
+        limit: int = 10,
+        exclude_corrections: bool = False,
+    ) -> list[LogicalEvent]:
+        """按发生时间倒序列出逻辑事件（`/cr history` 等只读命令使用）。
+
+        `exclude_corrections=True` 时排除「更正」行（`state_version` 以
+        `downgraded` 开头）：站点把某条 reset 降级为未确认时，更正事件同样落在
+        `group_kind="reset"`，若不过滤会被 `/cr history` 当成「已确认」列出（P2-09）。
+        """
         conn = self._connection()
-        if group_kind is None:
-            cursor = await conn.execute(
-                "SELECT * FROM logical_events ORDER BY occurred_at DESC, logical_id LIMIT ?",
-                (int(limit),),
-            )
-        else:
-            cursor = await conn.execute(
-                "SELECT * FROM logical_events WHERE group_kind = ?"
-                " ORDER BY occurred_at DESC, logical_id LIMIT ?",
-                (group_kind, int(limit)),
-            )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if group_kind is not None:
+            clauses.append("group_kind = ?")
+            params.append(group_kind)
+        if exclude_corrections:
+            clauses.append("state_version NOT LIKE 'downgraded%'")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(int(limit))
+        cursor = await conn.execute(
+            f"SELECT * FROM logical_events{where} ORDER BY occurred_at DESC, logical_id LIMIT ?",
+            tuple(params),
+        )
         rows = await cursor.fetchall()
         await cursor.close()
         return [self._logical_from_row(row) for row in rows]

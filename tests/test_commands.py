@@ -624,3 +624,92 @@ def test_status_has_no_diagnostic_lines_when_healthy(tmp_path: Path) -> None:
             await repo.close()
 
     run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# P2-09 / P2-10：history 只列确认重置；只读实例拒绝写指令
+# ---------------------------------------------------------------------------
+def test_history_excludes_non_reset_and_downgraded_rows(tmp_path: Path) -> None:
+    """`/cr history` 必须只列**确认重置**：watch/credits/预测与降级更正都不得混入。
+
+    非 reset 类别用更晚的时间制造「若过滤失效就会排在最前」的压力；
+    降级更正同样是 `group_kind="reset"`，是真实会发生且用户可见误导的一类。
+    """
+
+    async def scenario() -> str:
+        clock, repo, bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await _seed_reset(repo, "real-01", "2026-10-20T06:33:48Z")
+            for kind in ("watch", "credits", "forecast"):
+                await repo.record_logical_event(
+                    LogicalEvent(
+                        logical_id=f"{kind}:noise-01",
+                        kind=kind,
+                        group_kind=kind,
+                        state_version="active",
+                        occurred_at=utc(2026, 10, 20, 12, 0),
+                        payload={
+                            "summary": f"{kind} 噪声行",
+                            "occurred_at": "2026-10-20T12:00:00Z",
+                        },
+                    ),
+                    baseline=False,
+                )
+            await repo.record_logical_event(
+                LogicalEvent(
+                    logical_id="reset:revoked-01",
+                    kind="reset",
+                    group_kind="reset",
+                    state_version="downgraded:announced",
+                    occurred_at=utc(2026, 10, 20, 13, 0),
+                    payload={
+                        "summary": "该重置已被撤回",
+                        "occurred_at": "2026-10-20T13:00:00Z",
+                    },
+                ),
+                baseline=False,
+            )
+            reply = await service.handle(_request("history", ("10",)))
+            return reply.text
+        finally:
+            await repo.close()
+
+    text = run(scenario())
+
+    assert "最近 1 条确认重置" in text, text
+    assert "real-01" in text, text
+    assert "噪声行" not in text, "非 reset 类别不得出现在确认重置历史里"
+    assert "撤回" not in text, "降级更正（已撤回）不得被当成确认重置展示"
+
+
+def test_readonly_instance_rejects_write_commands_but_allows_queries(tmp_path: Path) -> None:
+    """P2-10：只读实例（另一实例持锁）必须拒绝写指令，查询指令照常可用。"""
+
+    async def scenario() -> tuple[Any, Any, Any, int]:
+        clock = FakeClock(utc(2026, 10, 20, 5, 0))
+        repo = await open_repo(tmp_path, clock=clock)
+        try:
+            bundle = make_pipeline(repo, clock)
+            service = CommandService(
+                repo=repo,
+                read=bundle.pipeline,
+                settings_provider=lambda: bundle.settings,
+                sink=FakeSink(),
+                clock=clock,
+                tz_provider=lambda: SHANGHAI,
+                readonly_provider=lambda: True,
+            )
+            subscribe = await service.handle(_request("subscribe"))
+            set_reply = await service.handle(_request("set", ("reset", "off")))
+            status = await service.handle(_request("status"))
+            return subscribe, set_reply, status, len(await repo.list_subscriptions())
+        finally:
+            await repo.close()
+
+    subscribe, set_reply, status, count = run(scenario())
+
+    assert subscribe.error == "readonly", subscribe.text
+    assert set_reply.error == "readonly", set_reply.text
+    assert "只读模式" in subscribe.text
+    assert count == 0, "只读实例不得写入订阅"
+    assert status.error is None or status.error == "no_data", status.text

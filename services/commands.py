@@ -70,7 +70,11 @@ ADMIN_COMMANDS: frozenset[str] = frozenset(
     {"subscribe", "unsubscribe", "settings", "set", "groups", "test"}
 )
 
+#: 会写数据库/配置的指令：只读模式（另一实例持锁）下必须拒绝（P2-10）
+WRITE_COMMANDS: frozenset[str] = frozenset({"subscribe", "unsubscribe", "set"})
+
 ADMIN_DENIED_TEXT = "仅管理员可执行该指令。使用 /cr help 查看权限说明。"
+READONLY_TEXT = "🔒 只读模式：检测到另一个插件实例正在运行，本实例仅支持查询，写操作已停用。"
 GROUP_ONLY_TEXT = "请在目标 QQ 群内执行 /cr subscribe（订阅来源必须取自真实群会话）。"
 GROUPS_PRIVATE_TEXT = "请在私聊中执行 /cr groups（群列表含推送健康信息）。"
 SET_USAGE = "用法：/cr set reset|watch|forecast|credits on|off；/cr set p24|p48 0-100 的整数"
@@ -182,14 +186,20 @@ class CommandService:
         sink: GroupConfigSink | None,
         clock: Clock,
         tz_provider: Callable[[], ZoneInfo],
+        readonly_provider: Callable[[], bool] | None = None,
     ) -> None:
-        """依赖注入；`repo` 只需提供本文件用到的仓储方法（便于测试替身）。"""
+        """依赖注入；`repo` 只需提供本文件用到的仓储方法（便于测试替身）。
+
+        `readonly_provider` 返回 True 时（另一实例持锁），所有**写**指令一律拒绝，
+        查询指令不受影响——只读实例仍然是一个可用的查询入口。
+        """
         self._repo = repo
         self._read = read
         self._settings_provider = settings_provider
         self._sink: GroupConfigSink = sink or _NullSink()
         self._clock = clock
         self._tz_provider = tz_provider
+        self._readonly = readonly_provider or (lambda: False)
         self._last_seen: dict[tuple[str, str], float] = {}
 
     # ------------------------------------------------------------------
@@ -211,6 +221,10 @@ class CommandService:
         if sub in ADMIN_COMMANDS and not req.is_admin:
             await self._audit(req, f"{sub}:denied", "forbidden", at=now)
             return CommandReply(text=self._finalize(ADMIN_DENIED_TEXT), error="forbidden")
+
+        # 权限判定在前（越权者看到的永远是权限文案），只读判定在后且不消耗限频额度
+        if sub in WRITE_COMMANDS and self._readonly():
+            return CommandReply(text=self._finalize(READONLY_TEXT), error="readonly")
 
         wait = self.check_rate(req.umo, sub, now)
         if wait > 0:
@@ -416,7 +430,9 @@ class CommandService:
                 return HISTORY_USAGE
         truncated = limit > HISTORY_MAX
         limit = min(limit, HISTORY_MAX)
-        events = await self._repo.list_events(group_kind="reset", limit=limit)
+        events = await self._repo.list_events(
+            group_kind="reset", limit=limit, exclude_corrections=True
+        )
         if not events:
             empty = ["🗂️【确认重置历史】", "", "暂无已确认的重置记录。"]
             return "\n".join(self._append_stale(empty, now, tz))

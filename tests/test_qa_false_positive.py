@@ -239,12 +239,17 @@ def test_trap_batch_produces_zero_deliveries(tmp_path):
 
     async def scenario():
         repo, bundle, clock = await make_env(tmp_path, baseline=built_baseline())
-        clock.set_now(NOW)
-        payload = timeline_payload("2026-10-20T11:55:00.000Z", [
-            none_row, trap_row, preview_row, boost_row, credits_trap,
-        ])
-        outcome = await bundle.pipeline.ingest("timeline", ok_fetch("timeline", payload, at=NOW))
-        return outcome, await repo.count_deliveries(), await repo.list_events(limit=50)
+        try:
+            clock.set_now(NOW)
+            payload = timeline_payload("2026-10-20T11:55:00.000Z", [
+                none_row, trap_row, preview_row, boost_row, credits_trap,
+            ])
+            outcome = await bundle.pipeline.ingest(
+                "timeline", ok_fetch("timeline", payload, at=NOW)
+            )
+            return outcome, await repo.count_deliveries(), await repo.list_events(limit=50)
+        finally:
+            await repo.close()
 
     outcome, deliveries, events = run(scenario())
 
@@ -264,13 +269,18 @@ def test_pipeline_still_delivers_the_one_genuine_reset(tmp_path):
 
     async def scenario():
         repo, bundle, clock = await make_env(tmp_path, baseline=built_baseline())
-        clock.set_now(NOW)
-        payload = timeline_payload(
-            "2026-10-20T11:55:00.000Z",
-            [*traps, confirmed_reset_row(REAL_RESET_ID, "2026-10-20T06:33:48.000Z")],
-        )
-        outcome = await bundle.pipeline.ingest("timeline", ok_fetch("timeline", payload, at=NOW))
-        return outcome, await repo.list_deliveries()
+        try:
+            clock.set_now(NOW)
+            payload = timeline_payload(
+                "2026-10-20T11:55:00.000Z",
+                [*traps, confirmed_reset_row(REAL_RESET_ID, "2026-10-20T06:33:48.000Z")],
+            )
+            outcome = await bundle.pipeline.ingest(
+                "timeline", ok_fetch("timeline", payload, at=NOW)
+            )
+            return outcome, await repo.list_deliveries()
+        finally:
+            await repo.close()
 
     outcome, deliveries = run(scenario())
 

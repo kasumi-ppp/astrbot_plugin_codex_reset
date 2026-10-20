@@ -83,7 +83,7 @@ services:
 | `/cr forecast` | 预测详情 + 置信度 + 实验性声明 | 群成员 | 15s | 否 |
 | `/cr latest` | 最近一次已确认重置 + 原始链接 | 群成员 | 15s | 否 |
 | `/cr credits` | 最近额外重置权益动态 | 群成员 | 15s | 否 |
-| `/cr history [n]` | 最近 n 条**已确认重置**（默认 3，上限 10，超出截断提示） | 群成员 | 15s | 否 |
+| `/cr history [n]` | 最近 n 条**已确认重置**（默认 3，上限 10，超出截断提示；已撤回的更正不计入） | 群成员 | 15s | 否 |
 | `/cr help` | 指令说明 + 权限表 + `/codexreset` 备用说明 | 群成员 | 15s | 否 |
 | `/cr subscribe` | 订阅当前群（`umo` 取自真实群会话） | AstrBot 管理员 | 5s | 否 |
 | `/cr unsubscribe` | 取消当前群订阅 | AstrBot 管理员 | 5s | 否 |
@@ -104,6 +104,9 @@ services:
 3. V1.2 不做 QQ 群主/群管授权；`admin_only_subscription=false` 仅为预留字段，**不会**放宽权限。
 4. 所有管理动作写入审计日志（`operator_id / umo 指纹 / action / result / UTC 时间`，无消息正文）。
 5. 限频按 `(umo, 子命令)` 计数，命中后回复剩余秒数且**不触发**任何上游请求。
+6. **只读模式**：同一 `data_dir` 上检测到另一个实例仍在运行（心跳新鲜且无干净退出标记）时，
+   本实例只提供查询，`/cr subscribe`、`/cr unsubscribe`、`/cr set` 统一回复「只读模式」提示，
+   不写任何事件、不建投递、不改 owner。避免两个实例互相覆盖配置。
 
 ---
 
@@ -177,6 +180,7 @@ WebUI 卡片只是编辑入口，**数据库始终是唯一真源**；卡片 `_v
 | 时间显示不对 | 检查 `time_zone` 是否为合法 IANA 名（如 `Asia/Shanghai`），非法值会回落并写 WARNING |
 | 权限被拒 | 管理指令要求 AstrBot 管理员；`subscribe/unsubscribe` 还必须在**群会话**内执行 |
 | 重启后重复收到旧消息 | 确认 `data/plugin_data/astrbot_plugin_codex_reset` 为持久卷；否则去重状态会丢失 |
+| 指令回「只读模式」 | 同一 `data_dir` 上还有另一个 AstrBot 实例在跑（或上次异常退出没写退出标记）。停止多余实例即可；确认只有一个实例后重启，插件会写入 `runtime:shutdown_at` 并重新接管。 |
 | 想彻底重置 | 停止插件 → 删除 `codex_reset.db*` 与 `audit/` → 重启并重新 `/cr subscribe` |
 
 日志统一带 `[codex-reset][模块]` 前缀，排障时建议 `grep "codex-reset"`。

@@ -320,6 +320,7 @@ class CodexResetRadar(Star):
             sink=self,
             clock=self.clock,
             tz_provider=self.current_timezone,
+            readonly_provider=lambda: self._readonly,
         )
 
         if not self._readonly:
@@ -362,33 +363,50 @@ class CodexResetRadar(Star):
         )
 
     async def terminate(self) -> None:
-        """停 Worker、取消任务、关 session、关数据库（幂等、无孤儿任务）。"""
+        """停 Worker、取消任务、关 session、关数据库（幂等、无孤儿任务）。
+
+        **释放运行权的两步（写 `runtime:shutdown_at` + 关库）放在 `finally`**：
+        任何一步抛异常都不能跳过它们，否则会留下「心跳新鲜 + 无退出标记」的残局，
+        下一次启动会把自己误判成「仍在运行的另一个实例」而永久只读（P1-03）。
+        """
         self._stopping = True
-        if self._worker is not None:
-            self._worker.stop()
-        self._poll_task = None
-        tasks = list(self._tasks)
-        self._tasks.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        if self._client is not None:
-            try:
-                await self._client.close()
-            except Exception:  # pragma: no cover - 关闭异常不应阻塞退出
-                logger.warning("[codex-reset][main] client.close 异常", exc_info=True)
-        if self._repo is not None:
-            try:
-                # 干净退出标记：让下一次启动能区分「自己刚退出」与「另一个实例仍在跑」
-                await self._repo.meta_set(RUNTIME_SHUTDOWN_KEY, self.clock.utcnow().isoformat())
-            except Exception:  # pragma: no cover - 退出路径不因写标记失败而中断
-                logger.warning("[codex-reset][main] 写入 shutdown 标记失败", exc_info=True)
-            try:
-                await self._repo.close()
-            except Exception:  # pragma: no cover
-                logger.warning("[codex-reset][main] repo.close 异常", exc_info=True)
+        tasks: list[asyncio.Task[Any]] = []
+        try:
+            if self._worker is not None:
+                try:
+                    self._worker.stop()
+                except Exception:  # pragma: no cover - 退出路径不因单步失败而中断
+                    logger.warning("[codex-reset][main] worker.stop 异常", exc_info=True)
+            self._poll_task = None
+            tasks = list(self._tasks)
+            self._tasks.clear()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if self._client is not None:
+                try:
+                    await self._client.close()
+                except Exception:  # pragma: no cover - 关闭异常不应阻塞退出
+                    logger.warning("[codex-reset][main] client.close 异常", exc_info=True)
+        finally:
+            await self._release_runtime()
         logger.info("[codex-reset][main] 已停止 tasks=%s", len(tasks))
+
+    async def _release_runtime(self) -> None:
+        """写干净退出标记并关闭数据库（`terminate` 的 `finally` 分支）。"""
+        repo = self._repo
+        if repo is None:  # pragma: no cover - 初始化失败时可能为空
+            return
+        try:
+            # 干净退出标记：让下一次启动能区分「自己刚退出」与「另一个实例仍在跑」
+            await repo.meta_set(RUNTIME_SHUTDOWN_KEY, self.clock.utcnow().isoformat())
+        except Exception:  # pragma: no cover - 退出路径不因写标记失败而中断
+            logger.warning("[codex-reset][main] 写入 shutdown 标记失败", exc_info=True)
+        try:
+            await repo.close()
+        except Exception:  # pragma: no cover
+            logger.warning("[codex-reset][main] repo.close 异常", exc_info=True)
 
     # ------------------------------------------------------------------
     # 后台循环
@@ -445,48 +463,54 @@ class CodexResetRadar(Star):
 
         判定阈值取 `2 × request_spacing_seconds`（至少两个采集周期）：正常运行的实例
         每轮都会刷新 `runtime:heartbeat_at`，因此「心跳在两轮内更新过」= 对方还活着。
-        只读模式只关闭**写入**路径（不写事件、不投递），`/cr status` 等读取仍完全可用。
+        只读模式只关闭**写入**路径（不写事件、不投递、不执行写指令），`/cr status` 等读取仍完全可用。
+
+        「读 owner/心跳/退出标记 → 判定 → 写 owner」必须在**同一个** `BEGIN IMMEDIATE`
+        事务内完成：分成多次 `meta_get` + `meta_set` 时，两个实例会各自读到「无主」快照、
+        双双认定自己持锁（P2-11）。
         """
         repo = self._repo
         if repo is None:  # pragma: no cover - 调用点保证已初始化
             return
         owner = f"{os.getpid()}:{uuid4().hex[:8]}"
-        previous = await repo.meta_get(RUNTIME_OWNER_KEY)
-        heartbeat = await repo.meta_get(RUNTIME_HEARTBEAT_KEY)
-        shutdown_at = await repo.meta_get(RUNTIME_SHUTDOWN_KEY)
         spacing = max(1, int(self._plugin_settings.request_spacing_seconds))
         threshold = 2 * spacing
 
-        if previous and previous != owner:
-            last = _parse_iso(heartbeat)
-            clean_exit = _parse_iso(shutdown_at)
-            same_process = previous.split(":", 1)[0] == str(os.getpid())
-            if same_process:
-                # 同进程内的插件热重载（如 WebUI 保存配置后框架重载插件）
-                logger.info(
-                    "[codex-reset][main] 同进程重新加载插件（owner=%s），直接接管运行权",
-                    previous,
-                )
-            elif last is not None and clean_exit is not None and clean_exit >= last:
-                logger.info(
-                    "[codex-reset][main] 上一实例已干净退出（%s），接管运行权", shutdown_at
-                )
-            elif last is not None:
-                age = (self.clock.utcnow() - last).total_seconds()
-                if age < threshold:
-                    logger.error(
-                        "[codex-reset][main] 检测到另一实例正在运行（owner=%s，心跳 %.0fs 前，"
-                        "阈值 %ss），本实例进入只读采集模式（不写事件、不投递）",
+        async with repo.atomic_meta() as tx:
+            previous = await tx.get(RUNTIME_OWNER_KEY)
+            heartbeat = await tx.get(RUNTIME_HEARTBEAT_KEY)
+            shutdown_at = await tx.get(RUNTIME_SHUTDOWN_KEY)
+
+            if previous and previous != owner:
+                last = _parse_iso(heartbeat)
+                clean_exit = _parse_iso(shutdown_at)
+                same_process = previous.split(":", 1)[0] == str(os.getpid())
+                if same_process:
+                    # 同进程内的插件热重载（如 WebUI 保存配置后框架重载插件）
+                    logger.info(
+                        "[codex-reset][main] 同进程重新加载插件（owner=%s），直接接管运行权",
                         previous,
-                        age,
-                        threshold,
                     )
-                    self._readonly = True
-                    return
-        self._owner = owner
-        await repo.meta_set(RUNTIME_OWNER_KEY, owner)
-        # 清掉上一次的退出标记，避免下一次启动把它当成「干净退出」的依据
-        await repo.meta_delete(RUNTIME_SHUTDOWN_KEY)
+                elif last is not None and clean_exit is not None and clean_exit >= last:
+                    logger.info(
+                        "[codex-reset][main] 上一实例已干净退出（%s），接管运行权", shutdown_at
+                    )
+                elif last is not None:
+                    age = (self.clock.utcnow() - last).total_seconds()
+                    if age < threshold:
+                        logger.error(
+                            "[codex-reset][main] 检测到另一实例正在运行（owner=%s，心跳 %.0fs 前，"
+                            "阈值 %ss），本实例进入只读采集模式（不写事件、不投递）",
+                            previous,
+                            age,
+                            threshold,
+                        )
+                        self._readonly = True
+                        return
+            self._owner = owner
+            await tx.set(RUNTIME_OWNER_KEY, owner)
+            # 清掉上一次的退出标记，避免下一次启动把它当成「干净退出」的依据
+            await tx.delete(RUNTIME_SHUTDOWN_KEY)
 
     # ------------------------------------------------------------------
     # 配置热更新（PRD §5「配置更改经验证后立即生效」）

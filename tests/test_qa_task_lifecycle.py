@@ -28,6 +28,7 @@ import pytest
 from conftest import FakeClock, run, utc
 
 from services.notifications import DeliveryWorker
+from services.models import CommandRequest
 from qa_helpers import UMO, built_baseline, env, open_repo_or_fail
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -478,7 +479,11 @@ def test_clean_shutdown_marker_allows_takeover_from_other_pid(tmp_path, monkeypa
 
 
 def test_live_other_instance_forces_readonly_without_delivery(tmp_path, monkeypatch):
-    """软单实例：他实例心跳新鲜且未写退出标记 → 本实例只读，且不启动投递任务。"""
+    """软单实例：他实例心跳新鲜且未写退出标记 → 本实例只读，且不写任何状态。
+
+    除了「不启动投递/采集任务」，还锁住三件事（P2-10/P2-11）：
+    只读实例**不得**改写 owner、**不得**写 deliveries、**不得**执行写指令。
+    """
     main = _load_main(monkeypatch, tmp_path / "data")
 
     async def scenario():
@@ -486,21 +491,40 @@ def test_live_other_instance_forces_readonly_without_delivery(tmp_path, monkeypa
         await first.initialize()
         await first.repo.meta_set("runtime:heartbeat_at", first.clock.utcnow().isoformat())
         # 模拟「对方仍在运行」：不调用 terminate，因此没有 shutdown_at
+        owner_before = await first.repo.meta_get("runtime:owner")
 
         monkeypatch.setattr(main.os, "getpid", lambda: 999999)
         second = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
         await second.initialize()
         readonly = second._readonly  # noqa: SLF001
         names = [task.get_name() for task in second._tasks]  # noqa: SLF001
+        owner_after = await second.repo.meta_get("runtime:owner")
+        deliveries = await second.repo.count_deliveries()
+        reply = await second._commands.handle(  # noqa: SLF001
+            CommandRequest(
+                umo="aiocqhttp:GroupMessage:7001",
+                is_group=True,
+                group_id="7001",
+                platform="aiocqhttp",
+                sender_id="1",
+                is_admin=True,
+                subcommand="subscribe",
+                args=(),
+                group_name="旁观群",
+            )
+        )
         await second.terminate()
         await first.terminate()
-        return readonly, names
+        return readonly, names, owner_before, owner_after, deliveries, reply
 
-    readonly, names = run(scenario())
+    readonly, names, owner_before, owner_after, deliveries, reply = run(scenario())
 
     assert readonly is True, "他实例心跳新鲜时必须进入只读模式"
     assert "codex-reset-delivery" not in names, "只读实例不得启动投递任务"
     assert "codex-reset-poll" not in names, "只读实例不得启动采集任务"
+    assert owner_after == owner_before, "只读实例不得改写 runtime:owner"
+    assert deliveries == 0, "只读实例不得写入任何投递记录"
+    assert reply.error == "readonly", f"只读实例的写指令必须被拒绝：{reply.text}"
 
 
 def test_send_maps_errors_and_reraises_timeout(tmp_path, monkeypatch):
@@ -633,3 +657,102 @@ def test_delivery_worker_type_is_used_by_plugin(tmp_path, monkeypatch):
         return worker
 
     assert isinstance(run(scenario()), DeliveryWorker)
+
+
+# ---------------------------------------------------------------------------
+# P1-03 / P2-11：退出标记必须写在 finally；抢占必须单事务
+# ---------------------------------------------------------------------------
+def test_terminate_writes_shutdown_marker_even_if_worker_stop_raises(tmp_path, monkeypatch):
+    """P1-03：`terminate()` 任何一步失败都不得跳过「写退出标记 + 关库」。
+
+    否则异常退出会留下「心跳新鲜 + 无退出标记」的残局：下一次启动会把它当成
+    「另一个仍在运行的实例」而永久只读，只能手工删库才能恢复。
+    """
+    import sqlite3
+
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        plugin = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await plugin.initialize()
+        await plugin.repo.meta_set("runtime:heartbeat_at", plugin.clock.utcnow().isoformat())
+        db_path = plugin.repo.db_path
+
+        class ExplodingWorker:
+            """`stop()` 必炸：模拟退出路径上的意外异常。"""
+
+            def stop(self) -> None:
+                raise RuntimeError("worker.stop 炸了")
+
+            async def run(self) -> None:
+                return None
+
+        plugin._worker = ExplodingWorker()  # noqa: SLF001
+        await plugin.terminate()
+        return db_path
+
+    db_path = run(scenario())
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+    finally:
+        conn.close()
+
+    assert "runtime:shutdown_at" in rows, "异常退出路径也必须写入干净退出标记"
+    assert rows["runtime:shutdown_at"], "退出标记不能是空值"
+
+
+def test_claim_runtime_owner_does_not_nest_meta_transactions(tmp_path, monkeypatch):
+    """P2-11：抢占必须「读-判定-写」同事务，不得再走独立 `meta_set`。
+
+    分步写会二次获取写锁并与判定脱钩：两个实例可能各自读到「无主」快照而双双持锁。
+    这里把「禁止调用 `meta_set`/`meta_delete`」变成可执行约束 —— 一旦有人改回
+    分步写法，本用例立即失败。
+    """
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        plugin = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await plugin.initialize()
+
+        async def forbidden(*_args, **_kwargs):
+            raise AssertionError("抢占不得使用 meta_set/meta_delete（会二次获取写锁、破坏原子性）")
+
+        monkeypatch.setattr(plugin.repo, "meta_set", forbidden)
+        monkeypatch.setattr(plugin.repo, "meta_delete", forbidden)
+        await plugin._claim_runtime_owner()  # noqa: SLF001
+        owner = await plugin.repo.meta_get("runtime:owner")
+        readonly = plugin._readonly  # noqa: SLF001
+        await plugin.terminate()  # 收尾：释放任务与数据库（meta_set 被替换，异常由 finally 兜住）
+        return owner, readonly
+
+    owner, readonly = run(scenario())
+
+    assert owner is not None, "抢占成功后必须写入 owner"
+    assert readonly is False, "无竞争时应拿到运行权"
+
+
+def test_second_instance_cannot_overwrite_live_owner(tmp_path, monkeypatch):
+    """P2-11（e）：后到实例看到活实例时，**不得**覆盖 owner（判定与写入原子）。"""
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        first = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await first.initialize()
+        await first.repo.meta_set("runtime:heartbeat_at", first.clock.utcnow().isoformat())
+        owner_before = await first.repo.meta_get("runtime:owner")
+
+        monkeypatch.setattr(main.os, "getpid", lambda: 999999)
+        second = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await second.initialize()
+        owner_after = await second.repo.meta_get("runtime:owner")
+        await second.terminate()
+        await first.terminate()
+        return owner_before, owner_after, second._readonly  # noqa: SLF001
+
+    owner_before, owner_after, readonly = run(scenario())
+
+    assert owner_before is not None
+    assert readonly is True, "活实例持锁时后到者必须只读"
+    assert owner_after == owner_before, "只读实例不得把 owner 改成自己"
