@@ -69,6 +69,24 @@ CATEGORY_FLAGS: dict[str, str] = {
     "credits": "enable_credits",
 }
 
+#: 事件类别 → 投递优先级（G03：数值越小越先发）
+#: 1. 已确认全球重置  2. 提前预告及重要更正  3. 额外权益  4. 普通概率提醒与补发摘要
+EVENT_PRIORITY: dict[str, int] = {
+    "reset": 0,
+    "watch": 1,
+    "credits": 2,
+    "forecast": 3,
+    "catchup": 3,
+}
+
+DEFAULT_EVENT_PRIORITY = 5
+"""未知类别的兜底优先级（排在所有已知类别之后）。"""
+
+
+def event_priority_for(kind: str) -> int:
+    """按事件 kind 取投递优先级（未知类别回落 `DEFAULT_EVENT_PRIORITY`）。"""
+    return EVENT_PRIORITY.get(str(kind or "").strip().lower(), DEFAULT_EVENT_PRIORITY)
+
 #: 投递失败的错误码（`adapter_unavailable` 表示平台找不到会话，可重试）
 RETRYABLE_ERROR = ErrorCode.ADAPTER_UNAVAILABLE
 
@@ -223,6 +241,11 @@ def _watch_window_text(payload: Mapping[str, Any], tz: ZoneInfo) -> str:
     return f"{local_start:%Y-%m-%d %H:%M} — {local_end:%Y-%m-%d %H:%M}（{zone}）"
 
 
+def watch_window_text(payload: Mapping[str, Any], tz: ZoneInfo) -> str:
+    """`_watch_window_text` 的公开别名（图片渲染与 pipeline 复用同一套窗口文案）。"""
+    return _watch_window_text(payload, tz)
+
+
 def _window_brief(payload: Mapping[str, Any], tz: ZoneInfo) -> str:
     """更正消息里的短窗口：`20:00—22:00` / 跨日全量 / 空串（不编造）。"""
     window = _window_of(payload)
@@ -241,12 +264,15 @@ def _window_brief(payload: Mapping[str, Any], tz: ZoneInfo) -> str:
 # 模板（PRD §6 逐字）
 # ---------------------------------------------------------------------------
 def render_reset(payload: Mapping[str, Any], *, tz: ZoneInfo, settings: Any) -> str:
-    """F01 确认重置（PRD §6.1）。"""
+    """F01 确认重置（PRD §6.1）；站点提供摘要时补一行事件说明（G05）。"""
     head = [
         "✅【Codex 全球重置已确认】",
         "",
         "codex-reset.com 已记录一次全球额度重置。",
     ]
+    summary = str(payload.get("summary") or "").strip()
+    if summary:
+        head.append(f"事件说明：{summary}")
     occurred = _payload_time(payload, "occurred_at")
     if occurred is not None:
         head.append(f"确认记录时间：{format_time(occurred, tz)}")
@@ -423,6 +449,33 @@ def render_test(*, tz: ZoneInfo, settings: Any) -> str:
     return _compose(head, [_source_line(settings)])
 
 
+def render_daily_report_text(payload: Mapping[str, Any], *, tz: ZoneInfo, settings: Any) -> str:
+    """每日预测图片的**文本降级**（P10）：仍包含 24h/48h 概率、数据更新时间、来源与免责声明。
+
+    只在「图片渲染失败 / 字体异常 / 适配器明确返回图片发送失败」且
+    `daily_report_text_fallback=true` 时使用；图片发送结果**不确定**（超时）时不允许补发。
+    """
+    from .report_renderer import (  # 局部导入避免与渲染器循环依赖
+        render_report_text_lines,
+    )
+
+    title = "📊【Codex 重置概率预测】"
+    if bool(payload.get("test")):
+        title = "🧪【测试消息】每日预测图片发送失败，已降级为文本（样例，非真实事件）"
+    elif bool(payload.get("manual")):
+        title = "📊【Codex 重置概率预测】（图片发送失败，已降级为文本）"
+    head = [title, "", *render_report_text_lines(payload, tz=tz)]
+    head.append("⚠️ 这是独立站点实验性预测，不代表官方承诺。")
+    return _compose(head, [_source_line(settings)])
+
+
+def render_test_report_text(payload: Mapping[str, Any], *, tz: ZoneInfo, settings: Any) -> str:
+    """`/cr test image` 的图片**文本降级**：标注「测试」，不改动任何真实状态。"""
+    payload = dict(payload)
+    payload["test"] = True
+    return render_daily_report_text(payload, tz=tz, settings=settings)
+
+
 # ---------------------------------------------------------------------------
 # 预测事件 payload ↔ 决策对象（pipeline 入队 / worker 渲染共用，保证字段一致）
 # ---------------------------------------------------------------------------
@@ -572,6 +625,10 @@ class DeliveryWorker:
         """请求退出 `run()`（不打断进行中的 `run_once`）。"""
         self._stopped = True
 
+    async def send_text(self, umo: str, text: str, at_all: bool = False) -> bool:
+        """公开的文本出站通道（每日报告文本降级复用，不进入投递队列）。"""
+        return bool(await self._send(umo, text, at_all))
+
     # -- 单条处理 -------------------------------------------------------
     async def _process(self, task: DeliveryTask, now: datetime) -> bool:
         """返回 True 表示已送达。"""
@@ -609,7 +666,12 @@ class DeliveryWorker:
             )
             return False
 
-        at_all = task.kind == "reset" and bool(getattr(plugin, "allow_at_all", False))
+        # G04：@全体成员 仅对「已确认全球重置」生效；重置的更正/降级不算确认重置
+        at_all = (
+            task.kind == "reset"
+            and not is_correction(task.payload)
+            and bool(getattr(plugin, "allow_at_all", False))
+        )
         try:
             # P1-02：单条发送必须有上限，否则适配器挂起会阻塞整条投递链
             accepted = await asyncio.wait_for(
@@ -714,7 +776,9 @@ __all__ = [
     "CATEGORY_FLAGS",
     "CONFIDENCE_CN",
     "CORRECTION_REASONS",
+    "DEFAULT_EVENT_PRIORITY",
     "DeliveryWorker",
+    "EVENT_PRIORITY",
     "MAX_MESSAGE_CHARS",
     "NO_WINDOW_TEXT",
     "RETRYABLE_ERROR",
@@ -725,14 +789,17 @@ __all__ = [
     "confidence_cn",
     "decision_from_payload",
     "decision_payload",
+    "event_priority_for",
     "format_day",
     "format_time",
     "is_correction",
     "render_catchup_summary",
     "render_correction",
     "render_credits",
+    "render_daily_report_text",
     "render_forecast_push",
     "render_reset",
     "render_test",
+    "render_test_report_text",
     "render_watch",
 ]

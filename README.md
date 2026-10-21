@@ -3,7 +3,7 @@
 AstrBot 插件：读取第三方站点 [codex-reset.com](https://codex-reset.com/) 的公开数据，向订阅的 QQ 群推送
 **Codex 全球重置确认、提前预警、重置概率、额外重置权益动态**四类消息。
 
-- 版本：`v1.2.0`｜作者：`kasumi-ppp`｜许可：**AGPL-3.0**
+- 版本：`v1.3.0`｜作者：`kasumi-ppp`｜许可：**AGPL-3.0**
 - 平台：AstrBot `>=4.16,<5`，消息平台 `aiocqhttp`（OneBot v11）
 - 数据来源署名：每条消息都含独立一行 `数据来源：https://codex-reset.com/`（**不可关闭**，许可要求）
 
@@ -27,6 +27,28 @@ AstrBot 插件：读取第三方站点 [codex-reset.com](https://codex-reset.com
 - **礼貌采集**：固定 UA、请求间隔 ≥60s、429 尊重 `Retry-After`、失败按 2/4/8/15 分钟退避；
 - **陈旧抑制**：`feed.stale` 或源端数据过旧时仍入库但不推送，并在查询里标注「数据可能已过时」；
 - **SQLite 持久化** + 审计 JSONL（只记操作人与 umo 指纹，不记消息正文）。
+
+### 每日预测图片（v1.3.0 新增，默认关闭）
+
+每天固定时间向开启了该能力的群发送一张 **900×1200 PNG** 概率预测卡片：
+
+- **定时发送**：按 `daily_report_time`（默认 `09:00`）与 `daily_report_timezone`（默认 `Asia/Shanghai`）
+  计算「业务日期 + 到期窗口」，到期窗口内每 30s 巡检一次并补发；
+- **深浅双主题**：`daily_report_theme = dark`（深色科技风）/ `light`（浅色简洁风）；
+- **每群每天至多一张**：`(subscription_id, business_date)` 为主键，重启后不会重复发送当天图片；
+- **文本降级**：渲染失败（缺 CJK 字体/超时）或 `daily_report_text_fallback=true` 时改发等价文本卡片；
+- **结果已知才降级**：图片发送**超时**（结果未知）时记录 `uncertain` 且**不再补发文本**，避免重复刷屏；
+- **数据陈旧则不发**：无快照或源端数据超过 `max_source_age_minutes` 时跳过（记录 `skipped`），
+  宁可不发也不发旧数据；
+- **失败重试**：非终态失败按 `daily_report_retry_minutes` 重试，超过 `daily_report_expiry_minutes`
+  到期窗口后不再重发；
+- **只读模式不发图**：被判定为只读实例时不参与任何日报发送。
+
+卡片内容：24h/48h 概率（含进度条）、最近一次**已确认**全球重置（无记录时显示「暂无记录」）、
+官方预告状态、数据更新时间、模型置信度、实验性预测声明、
+`数据来源：https://codex-reset.com/` 与生成器署名。
+
+依赖 **Pillow>=10.1**（已写入 `requirements.txt`）；若运行环境缺少中文字体，卡片会自动降级为文本。
 
 ---
 
@@ -53,7 +75,7 @@ pip install -r astrbot_plugin_codex_reset/requirements.txt
 
 ```
 data/plugin_data/astrbot_plugin_codex_reset/
-├── codex_reset.db        # SQLite（订阅、快照、逻辑事件、投递队列、预测状态）
+├── codex_reset.db        # SQLite（订阅、快照、逻辑事件、投递队列、预测状态、日报记录）
 ├── codex_reset.db-wal
 ├── codex_reset.db-shm
 └── audit/
@@ -88,10 +110,12 @@ services:
 | `/cr subscribe` | 订阅当前群（`umo` 取自真实群会话） | AstrBot 管理员 | 5s | 否 |
 | `/cr unsubscribe` | 取消当前群订阅 | AstrBot 管理员 | 5s | 否 |
 | `/cr settings` | 本群生效配置与来源（群覆盖 / 全局默认） | AstrBot 管理员 | 5s | 否 |
-| `/cr set reset\|watch\|forecast\|credits on\|off` | 按群开关一类通知 | AstrBot 管理员 | 5s | 否 |
+| `/cr set reset\|watch\|forecast\|credits\|daily on\|off` | 按群开关一类通知（`daily` = 每日预测图片） | AstrBot 管理员 | 5s | 否 |
 | `/cr set p24\|p48 <0-100>` | 按群设置概率阈值（越界拒绝并回显合法区间） | AstrBot 管理员 | 5s | 否 |
 | `/cr groups` | 订阅群列表 + 推送健康（最近成功/失败、uncertain 计数），建议私聊 | AstrBot 管理员 | 10s | 否 |
+| `/cr report` | 立即生成并发送当日预测图片（手动触发，**不占用**每日自动额度） | AstrBot 管理员 | 60s | 否 |
 | `/cr test` | 当前群发送一条标注「测试」的样例消息（不入库、不建投递） | AstrBot 管理员 | 60s | 否 |
+| `/cr test image` | 发送一张标注「测试图片」的当日预测图片（不入库、不影响日报去重） | AstrBot 管理员 | 60s | 否 |
 
 所有查询命令**只读内存缓存与 SQLite**，不会触发任何上游请求，因此响应不会被采集阻塞（AC-21）。
 
@@ -112,7 +136,7 @@ services:
 
 ---
 
-## 4. 配置（`_conf_schema.json`，19 个字段）
+## 4. 配置（`_conf_schema.json`，26 个字段）
 
 | 字段 | 类型 | 默认 | 说明 | 可被群覆盖 |
 |---|---|---|---|---|
@@ -131,9 +155,16 @@ services:
 | `max_source_age_minutes` | int | `10` | 超过该分钟数视为陈旧：入库但不推送（1-120） | 否 |
 | `max_catchup_hours` | int | `6` | 启动补发回溯小时数（0-24） | 否 |
 | `enable_catchup` | bool | `false` | 启动时补发最近遗漏（每群最多 1 条摘要） | 否 |
-| `allow_at_all` | bool | `false` | 确认重置时尝试 `@全体成员`（仅 aiocqhttp） | 否 |
+| `allow_at_all` | bool | `false` | **仅**确认重置时尝试 `@全体成员`（仅 aiocqhttp）；预警/概率/权益/日报一律不 @ | 否 |
+| `enable_daily_report` | bool | `false` | 每日预测图片总开关（默认关闭） | 是 |
+| `daily_report_time` | string | `09:00` | 每日发送时间 `HH:MM`（非法回落到默认并告警） | 否 |
+| `daily_report_timezone` | string | `Asia/Shanghai` | 每日发送时区（IANA 名，非法回落并告警） | 否 |
+| `daily_report_theme` | string | `dark` | 图片主题 `dark`/`light`（非法回落 `dark`） | 否 |
+| `daily_report_retry_minutes` | int | `5` | 日报失败重试间隔（1-60） | 否 |
+| `daily_report_expiry_minutes` | int | `30` | 日报到期窗口长度（1-240；小于重试间隔时告警） | 否 |
+| `daily_report_text_fallback` | bool | `true` | 图片渲染/发送**已知失败**时改发文本卡片 | 否 |
 | `show_source_link` | bool | `true` | 署名行开关；**不可关闭**（置 false 仍渲染并告警） | 否 |
-| `admin_only_subscription` | bool | `true` | 预留字段：V1.2 固定只放行 `event.is_admin()` | 否 |
+| `admin_only_subscription` | bool | `true` | 预留字段：当前固定只放行 `event.is_admin()` | 否 |
 | `group_overrides` | template_list | `[]` | 群级配置卡片（由 `/cr subscribe` 与 `/cr set` 自动维护） | — |
 
 **有效配置 = 全局默认 ⊕ 群级覆盖**：`subscriptions.settings_json` 只保存「显式覆盖过」的字段，
@@ -142,6 +173,10 @@ WebUI 卡片只是编辑入口，**数据库始终是唯一真源**；卡片 `_v
 过期并忽略（不会覆盖数据库），卡片缺失则下次启动按库重新投影回填。
 
 `/cr set` 把某个值改回全局默认时，会**删除**该覆盖字段，重新回到「继承」语义。
+
+每日预测图片采用**全局总开关 + 群级开关**两级：`enable_daily_report=false` 时任何群都不发送；
+全局开启后，还需对本群执行 `/cr set daily on` 才会发送（订阅动作本身不会自动打开日报）。
+`/cr report` 与 `/cr test image` 是手动/测试通道，**不受**这两级开关约束，也不消耗当日自动额度。
 
 ---
 
@@ -159,6 +194,11 @@ WebUI 卡片只是编辑入口，**数据库始终是唯一真源**；卡片 `_v
    其他平台静默省略。
 6. **单实例建议**：同一数据库被两个 AstrBot 实例同时写入时，去重靠唯一约束兜底，但仍可能出现
    重复投递；请勿在同一条数据卷上并行运行多个实例。
+7. **图片依赖字体**：预测图片用 Pillow 本地渲染，需要环境中存在中文字体（Windows 微软雅黑/黑体、
+   Linux `Noto Sans CJK`、macOS `PingFang`/`Hiragino` 等）。找不到字体时该次日报降级为文本卡片，
+   不会发送缺字图片；图片发送结果未知时按 `uncertain` 处理且不再补发文本。
+8. **日报去重粒度**：按 `(群, 业务日期)` 至多一张。业务日期以 `daily_report_timezone` 为准，
+   跨时区迁移或改时区可能造成当天重复/跳过一次。
 
 ---
 
@@ -184,6 +224,9 @@ WebUI 卡片只是编辑入口，**数据库始终是唯一真源**；卡片 `_v
 | 重启后重复收到旧消息 | 确认 `data/plugin_data/astrbot_plugin_codex_reset` 为持久卷；否则去重状态会丢失 |
 | 指令回「只读模式」 | 同一 `data_dir` 上还有另一个 AstrBot 实例在跑（或上次异常退出没写退出标记）。停止多余实例即可；确认只有一个实例后重启，插件会写入 `runtime:shutdown_at` 并重新接管。 |
 | 想彻底重置 | 停止插件 → 删除 `codex_reset.db*` 与 `audit/` → 重启并重新 `/cr subscribe` |
+| 每天没收到预测图片 | ① 全局 `enable_daily_report` 是否为 `true`（默认 `false`）；② 本群 `/cr set daily on`；③ `daily_report_time`/`daily_report_timezone` 是否符合预期；④ `/cr report` 手工验证；⑤ 到期窗口 `daily_report_expiry_minutes` 内插件是否在线 |
+| 预测图片变成文字 | 运行环境缺少中文字体或渲染/发送已知失败，已按 `daily_report_text_fallback` 降级。安装 CJK 字体即可恢复图片；发送超时（结果未知）时既不重发图片也不补发文本 |
+| 同一天收到多张图片 | 确认只有一个 AstrBot 实例写同一数据卷；数据卷丢失也会导致去重状态丢失 |
 
 日志统一带 `[codex-reset][模块]` 前缀，排障时建议 `grep "codex-reset"`。
 
@@ -193,7 +236,7 @@ WebUI 卡片只是编辑入口，**数据库始终是唯一真源**；卡片 `_v
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) | AC-01 ~ AC-24 验收矩阵、自动化测试节点映射、人工联调清单（AC-15/16/17/22 待真实群验收） |
+| [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) | AC-01 ~ AC-25 验收矩阵、自动化测试节点映射、人工联调清单（含真实 QQ 群联调项） |
 | [`docs/architecture.md`](docs/architecture.md) | 分层架构、数据库 schema、决策记录（D-01 ~ D-12） |
 | [`docs/PRD-confirmation.md`](docs/PRD-confirmation.md) | 需求与验收纪律来源 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更 |

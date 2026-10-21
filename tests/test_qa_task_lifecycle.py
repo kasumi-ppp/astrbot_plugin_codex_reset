@@ -282,6 +282,27 @@ class FakeAt:
         self.qq = qq
 
 
+class FakeImage:
+    """`Comp.Image` 替身：三种构造方式都返回实例，记录来源便于断言。"""
+
+    def __init__(self, *, source: str, payload: Any = None, path: str = "") -> None:
+        self.source = source
+        self.payload = payload
+        self.file = path
+
+    @classmethod
+    def fromBytes(cls, data: bytes) -> FakeImage:
+        return cls(source="bytes", payload=data)
+
+    @classmethod
+    def fromBase64(cls, text: str) -> FakeImage:
+        return cls(source="base64", payload=text)
+
+    @classmethod
+    def fromFileSystem(cls, path: str) -> FakeImage:
+        return cls(source="file", path=path)
+
+
 class FakeMessageChain:
     """`MessageChain` 替身：`chain` 列表 + `message()`。"""
 
@@ -358,7 +379,7 @@ def _install_astrbot_stub() -> None:
     event_filter.parent = event  # type: ignore[attr-defined]
     api.event = event  # type: ignore[attr-defined]
 
-    components = _module("astrbot.api.message_components", At=FakeAt)
+    components = _module("astrbot.api.message_components", At=FakeAt, Image=FakeImage)
     api.message_components = components  # type: ignore[attr-defined]
 
     star_module = _module(
@@ -640,9 +661,15 @@ def test_status_snapshot_is_read_only(tmp_path, monkeypatch):
 
     assert before == {"ready": False, "readonly": False}
     assert snapshot["ready"] is True
-    # 投递任务 + 配置热更新任务（后者即使 enable_monitor=false 也必须常驻）
-    assert snapshot["tasks"] == 2
-    assert names == ["codex-reset-config-watch", "codex-reset-delivery"]
+    # 投递任务 + 每日报告任务 + 配置热更新任务（后者即使 enable_monitor=false 也必须常驻）
+    assert snapshot["tasks"] == 3
+    assert sorted(names) == sorted(
+        [
+            "codex-reset-config-watch",
+            "codex-reset-delivery",
+            "codex-reset-daily-report",
+        ]
+    )
     assert snapshot["groups"] == 0
 
 

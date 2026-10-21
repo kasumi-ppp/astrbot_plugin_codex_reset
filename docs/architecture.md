@@ -1,6 +1,8 @@
-# Codex 重置雷达 V1.2 — 系统架构设计 + 有序任务列表
+# Codex 重置雷达 V1.3 — 系统架构设计 + 有序任务列表
 
-> 依据 `docs/PRD-confirmation.md`（D-01~D-12、命令表、配置表、模板、AC-01~AC-24），冲突以其为准。基线 Python 3.12 / AstrBot 4.29.1 / OneBot v11 / Win+Linux｜`v1.2.0`｜`kasumi-ppp`
+> 依据 `docs/PRD-confirmation.md`（D-01~D-12、命令表、配置表、模板、AC-01~AC-26），冲突以其为准。基线 Python 3.12 / AstrBot 4.29.1 / OneBot v11 / Win+Linux｜`v1.3.0`｜`kasumi-ppp`
+> v1.3.0 增量：每日预测图片（`report_renderer.py` + `DailyReportScheduler` + `daily_reports` 表）、
+> 投递优先级、群级日报开关。详见 `CHANGELOG.md`。
 > 本文不含实现代码，只有签名、DDL、算法规则与伪代码（≤10 行）。
 
 ## A. 总体设计
@@ -14,16 +16,19 @@ graph TD
   CMD["L1 commands.py<br/>路由/权限/限频"]
   CLS["L2 classifier.py<br/>EventClassifier+ForecastEvaluator"]
   NOT["L2 notifications.py<br/>render_*+DeliveryWorker"]
-  REPO["L3 repository.py<br/>SQLite 六表"]
+  REPO["L3 repository.py<br/>SQLite 七表"]
   CLI["L3 client.py<br/>aiohttp"]
-  SCH["L3 scheduler.py<br/>槽位/退避"]
+  SCH["L3 scheduler.py<br/>槽位/退避 + DailyReportScheduler"]
+  RND["L3 report_renderer.py<br/>Pillow 出图（零 I/O）"]
   MOD["L4 models.py"]
   PAR["L4 parser.py / config.py / clock.py / errors.py"]
   MAIN-->PIPE
   MAIN-->CMD
   MAIN-.SendFn.->NOT
-  PIPE-->CLS & NOT & REPO & CLI & SCH
+  MAIN-.ImageSendFn.->PIPE
+  PIPE-->CLS & NOT & REPO & CLI & SCH & RND
   CMD-->REPO & NOT
+  RND-->MOD
   CLS-->MOD
   NOT-->MOD
   REPO-->MOD
@@ -31,7 +36,12 @@ graph TD
   PAR-->MOD
 ```
 
-**硬约束**：`services/**` 禁止 `import astrbot`；`SendFn = Callable[[str, str], Awaitable[bool]]` 是唯一出站通道，仅在 `main.py` 实现。依赖严格单向 `main → pipeline/commands → classifier/notifications/repository → parser/client/models/clock`；`classifier` 不 import `repository`，`repository` 不 import `pipeline`。
+**硬约束**：`services/**` 禁止 `import astrbot`；出站通道只有两个 Protocol，且**仅在 `main.py` 实现**——
+`SendFn = Callable[[str, str], Awaitable[bool]]`（文本）与
+`ImageSendFn = Callable[[str, bytes, str], Awaitable[bool]]`（图片，`(umo, png, filename) -> 是否已知发送成功`；
+返回 `None`/超时语义由 `main.py` 转换为 `TimeoutError`，供 pipeline 记为 `uncertain`）。
+依赖严格单向 `main → pipeline/commands → classifier/notifications/repository → parser/client/models/clock`；
+`classifier` 不 import `repository`，`repository` 不 import `pipeline`，`report_renderer` 不 import `repository`/`client`。
 
 ### A.2 模块职责一句话
 
@@ -41,12 +51,13 @@ graph TD
 | `models.py` / `errors.py` / `clock.py` | 全部 frozen dataclass + `SendFn`/`ReadModel` Protocol（零副作用）；错误码与异常、`USER_AGENT`；`Clock`+`FakeClock` |
 | `config.py` / `parser.py` | dict→`PluginSettings`（校验/回落/群覆盖合并）；JSON→快照（fail-closed + 逐字段降级，AC-23） |
 | `client.py` | aiohttp GET 三端点；状态/异常→`FetchResult(error_code)`；解析 `x-published-*` |
-| `scheduler.py` | `forecast→timeline→forecast→feed` 轮换、≥60s 间隔、强制 timeline、2/4/8/15min 退避 |
+| `scheduler.py` | `forecast→timeline→forecast→feed` 轮换、≥60s 间隔、强制 timeline、2/4/8/15min 退避；`DailyReportScheduler`（业务日期 / 到期窗口 / 重试间隔，**纯计算**） |
 | `classifier.py` | `EventClassifier`（reset/watch/correction/credits + id/版本生成）、`ForecastEvaluator`（纯函数） |
-| `repository.py` | aiosqlite 单写锁事务、六表 CRUD、别名、投递队列、预测状态、审计 JSONL |
+| `repository.py` | aiosqlite 单写锁事务、**七表** CRUD（`daily_reports` 为 v1.3.0 新增）、别名、投递队列（含 `priority`）、预测状态、审计 JSONL |
+| `report_renderer.py` | v1.3.0 新增：Pillow 渲染 900×1200 PNG（dark/light）、文本降级行、CJK 字体发现；**除字体文件外零 I/O**，失败抛 `ReportRenderError` |
 | `notifications.py` | `render_*` 纯文本模板（AC-20）+ `DeliveryWorker`（认领/重试/uncertain） |
 | `commands.py` | `CommandRequest→CommandReply`、子命令路由、权限、`(umo,子命令)` 限频、配置编排 |
-| `pipeline.py` | 固定处理链 `bootstrap/poll_round/ingest/evaluate_all` + 内存快照缓存（`ReadModel`） |
+| `pipeline.py` | 固定处理链 `bootstrap/poll_round/ingest/evaluate_all` + 内存快照缓存（`ReadModel`）+ `run_daily_reports()` 日报巡检（v1.3.0） |
 
 ### A.3 固定处理链落点
 
@@ -109,7 +120,7 @@ sequenceDiagram
 | `services/models.py` / `errors.py` / `clock.py` | 源码 | dataclass 与 Protocol；错误码/异常/`USER_AGENT`；`Clock`+`FakeClock` | 385 |
 | `services/config.py` / `parser.py` | 源码 | 配置解析与回落；三端点解析、逐字段降级 | 490 |
 | `services/client.py` / `scheduler.py` | 源码 | 采集 + 错误映射 + header 解析；槽位轮换、间隔、退避 | 310 |
-| `services/classifier.py` / `repository.py` | 源码 | 事件判定 + id/版本生成 + 预测评估；SQLite 六表 + 别名 + 队列 + 审计 | 950 |
+| `services/classifier.py` / `repository.py` | 源码 | 事件判定 + id/版本生成 + 预测评估；SQLite 七表 + 别名 + 队列 + 审计 | 950 |
 | `services/notifications.py` / `commands.py` | 源码 | 模板渲染 + 投递 Worker；命令路由/权限/限频/回显 | 900 |
 | `services/pipeline.py` | 源码 | 处理链 + 缓存 + 补发计划 | 380 |
 | `tests/conftest.py` | 测试 | `load_fixture`、`run()`（asyncio.run 包装）、`FakeClock`、`RecordingSend`、`make_repo` | 130 |
@@ -388,7 +399,7 @@ build_logical_id(kind, ev_id, alert_id, window_kind, anchor_at):        # 伪代
 其余 add_alias → canonical；跨轮由 find_logical_by_alias 命中，故 timeline 迟到补齐不会二次推送。
 ```
 
-## D. 数据库 DDL（六表，`schema_version=2`）
+## D. 数据库 DDL（七表，`schema_version=3`）
 
 ```sql
 PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;
@@ -425,9 +436,13 @@ CREATE TABLE IF NOT EXISTS deliveries (
   attempt INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   sent_at TEXT, error_code TEXT, message_hash TEXT,
+  priority INTEGER NOT NULL DEFAULT 5,      -- v1.3.0：G03 消息优先级（新库随建表产生）
   UNIQUE (subscription_id, logical_id, state_version));
 CREATE INDEX IF NOT EXISTS idx_deliveries_queue ON deliveries(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_sub ON deliveries(subscription_id, created_at DESC);
+-- v1.3.0：下面这个索引引用 priority，旧库没有该列，因此它建在 _ensure_columns() 的
+-- ALTER TABLE … ADD COLUMN priority **之后**，绝不能放进上面的建表脚本，见「升级策略」
+-- CREATE INDEX IF NOT EXISTS idx_deliveries_priority ON deliveries(status, priority, id);
 CREATE TABLE IF NOT EXISTS forecast_state (
   subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(subscription_id) ON DELETE CASCADE,
   hits_24h INTEGER NOT NULL DEFAULT 0, hits_48h INTEGER NOT NULL DEFAULT 0,
@@ -435,16 +450,33 @@ CREATE TABLE IF NOT EXISTS forecast_state (
   cooldown_until TEXT, day_key TEXT NOT NULL DEFAULT '', day_count INTEGER NOT NULL DEFAULT 0,
   epoch_seq INTEGER NOT NULL DEFAULT 0, last_prob_24h INTEGER, last_prob_48h INTEGER,
   last_sample_at TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS daily_reports (              -- v1.3.0 新增第七表
+  subscription_id TEXT NOT NULL REFERENCES subscriptions(subscription_id) ON DELETE CASCADE,
+  business_date TEXT NOT NULL,                          -- daily_report_timezone 下的 YYYY-MM-DD
+  status TEXT NOT NULL DEFAULT 'pending',               -- pending|sending|sent|failed|uncertain|skipped
+  attempt INTEGER NOT NULL DEFAULT 0, theme TEXT, image_sha1 TEXT, error_code TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_at TEXT, next_attempt_at TEXT,
+  PRIMARY KEY (subscription_id, business_date));
+CREATE INDEX IF NOT EXISTS idx_daily_reports_date ON daily_reports(business_date);
 ```
+
+**投递优先级**（v1.3.0，G03）：`deliveries.priority INTEGER NOT NULL DEFAULT 5`；
+`reset=0 < watch=1 < credits=2 < forecast/catchup=3`，其余 `5`；
+`claim_pending_deliveries` 按 `priority ASC, id ASC`，保证确认重置先于其他消息出队。
 
 | meta 键 | 用途 |
 |---|---|
-| `schema_version` | `2` |
-| `alias:{alias}` | 别名 → canonical `logical_id`（承载 D-08，避免第七张表） |
+| `schema_version` | `3`（v1.3.0） |
+| `alias:{alias}` | 别名 → canonical `logical_id`（承载 D-08，不额外建表） |
 | `baseline:built` / `baseline:last_reset_at` / `baseline:watch_source_at` / `baseline:built_at` | 首轮基线与 F02 `source_at` 基线 |
 | `runtime:owner` / `heartbeat_at` / `boot_id`；`health:{endpoint}` | 软单实例；最近失败错误码与计数（`/cr status` 降级行） |
 
-**升级策略**：`schema_version` 缺失或 `<2` → 直接 `CREATE TABLE IF NOT EXISTS`（无历史部署，无需迁移）并写入 `2`；`>2` → 抛 `SchemaTooNewError`，`main.py` 捕获后不写任何数据、`enable_monitor` 运行时 false、ERROR 日志提示升级插件（`/cr status` 仍返回错误说明）。时间列一律 `ISO8601 UTC` 字符串，字典序即时间序，`WHERE next_attempt_at <= ?` 可直接比较。
+**升级策略**：`schema_version` 缺失或 `<3` → 逐表 `CREATE TABLE IF NOT EXISTS` 补齐新表（如 `daily_reports`），并写入 `3`；`>3` → 抛 `SchemaTooNewError`，`main.py` 捕获后不写任何数据、`enable_monitor` 运行时 false、ERROR 日志提示升级插件（`/cr status` 仍返回错误说明）。
+
+**列级迁移（v1.2 → v1.3.0，顺序敏感）**：`Repository._ensure_columns()` 用 `PRAGMA table_info()` 检测列缺失后 `ALTER TABLE … ADD COLUMN`，支持的补列有 `deliveries.priority`、`forecast_state.alert_seq`。
+⚠️ **引用新列的索引必须在补列之后创建**：`idx_deliveries_priority` 若放进 `_DDL`（`executescript` 在建表阶段执行），在旧库上会因 `no such column: priority` 让**打开数据库直接失败**，等于升级即崩溃。同理，检测列存在后再建索引，可让新库（建表时已有列）与旧库（刚补列）走同一条路径。
+
+时间列一律 `ISO8601 UTC` 字符串，字典序即时间序，`WHERE next_attempt_at <= ?` 可直接比较。
 **写并发**：单 `asyncio.Lock` 包住每个写事务（`BEGIN IMMEDIATE … COMMIT`）+ `busy_timeout=5000`；WAL 下读不加锁。`enqueue_delivery` 用 `ON CONFLICT(subscription_id,logical_id,state_version) DO NOTHING`，返回 `rowcount>0`。
 
 ## E. 关键时序图
@@ -653,7 +685,7 @@ sequenceDiagram
 |---|---|---|---|---|
 | T1 | 内核骨架：模型/时钟/错误码/工程配置 | `services/__init__.py`、`models.py`、`clock.py`、`errors.py`、`pyproject.toml`、`requirements.txt` | — | `python -c "import services.models, services.clock, services.errors"` 通过；`ruff check services` 通过；`grep -r "import astrbot" services/` 为空；dataclass 均可实例化 |
 | T2 | 配置解析 + 三端点解析 + fixtures 基线 | `services/config.py`、`services/parser.py`、`tests/conftest.py`、`tests/fixtures/*.json`、`tests/test_parser.py` | T1 | `pytest tests/test_parser.py -q` 全绿；坏 JSON→`invalid_json`、缺必填→`schema_error`、枚举污染→降级且 `warnings` 非空；`build_plugin_settings({"request_spacing_seconds":30})` 得 60 且 `warnings` 非空 |
-| T3 | Repository：六表 DDL + 别名 + 队列 + 审计 | `services/repository.py`、`tests/test_repository.py`、`tests/fixtures/legacy_meta.json` | T1,T2 | `meta.schema_version=="2"`；重复 `(sub,logical_id,state_version)` `rowcount=0`；`alias:*` 往返；`requeue_inflight_as_uncertain` 生效；`schema_version="3"` 抛 `SchemaTooNewError` |
+| T3 | Repository：七表 DDL + 别名 + 队列 + 审计 + 日报 | `services/repository.py`、`tests/test_repository.py`、`tests/test_daily_report.py`、`tests/fixtures/legacy_meta.json` | T1,T2 | `meta.schema_version=="3"`；重复 `(sub,logical_id,state_version)` `rowcount=0`；`alias:*` 往返；`requeue_inflight_as_uncertain` 生效；v1.2 旧库可打开且 `deliveries.priority` 迁移成功；`claim_daily_report` 同 `(sub,date)` 第二次返回 `False`；`schema_version="4"` 抛 `SchemaTooNewError` |
 | T4 | 采集客户端 + 槽位调度 | `services/client.py`、`services/scheduler.py`、`tests/test_scheduler.py`、`tests/fixtures/headers_{304,429,502}.json` | T1,T2 | 429→`http_429` 且 `retry_after==120`；304→`not_modified`；502→`http_5xx`；轮换序列 `forecast,timeline,forecast,feed` 且间隔 ≥60s；`force_timeline()` 后下一槽位为 timeline；退避 2/4/8/15min |
 | T5 | 分类器（reset/watch/correction）+ id/版本生成 | `services/classifier.py`（`build_logical_id`/`build_state_version`/`evaluate_reset`/`evaluate_reset_correction`/`evaluate_watch`/`evaluate_watch_correction`）、`tests/test_classifier.py`、`tests/test_watch.py` | T2,T3 | AC-01/02/05/06/07/08/23 断言全绿；`build_state_version("watch", state="active", window_start_at=None)=="active:nowindow"`；陷阱行 `2109045392684032299` 零事件 |
 | T6 | 预测评估器 + credits 分类 | `services/classifier.py`（`ForecastEvaluator`、`evaluate_credits`）、`tests/test_forecast.py`、`tests/test_credits.py`、`tests/fixtures/prob_series_{42_51_54,60}.json` | T5 | AC-09/10/11/12 全绿；`threshold_24h=0` 时 24h 恒不触发；`state_version=="h24:0"`；credits `unknown` 0 条 |

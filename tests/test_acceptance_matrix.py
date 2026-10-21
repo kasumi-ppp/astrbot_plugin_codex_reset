@@ -1,4 +1,4 @@
-"""验收矩阵静态核对：AC-01 ~ AC-24 每条都必须映射到**真实存在**的测试函数。
+"""验收矩阵静态核对：AC-01 ~ AC-26 每条都必须映射到**真实存在**的测试函数。
 
 只做静态断言（`importlib` 导入对应测试模块 + `hasattr`），不依赖
 `pytest --collect-only` 的输出格式，因此在任何 pytest 版本下都稳定。
@@ -75,10 +75,27 @@ AC_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("test_dedupe", "test_concurrent_enqueue_creates_single_row"),
         ("test_dedupe", "test_ten_concurrent_run_once_only_one_delivery"),
     ),
+    "AC-25": (
+        ("test_daily_report", "test_daily_report_sends_once_per_group_per_day"),
+        ("test_daily_report", "test_daily_reports_survive_reopen"),
+        ("test_daily_report", "test_daily_report_stale_data_is_skipped_with_error"),
+        ("test_daily_report", "test_daily_report_text_fallback_on_image_failure"),
+        ("test_daily_report", "test_daily_report_uncertain_send_never_retries_or_falls_back"),
+    ),
+    "AC-26": (
+        ("test_daily_report", "test_daily_report_respects_group_switch"),
+        ("test_daily_report", "test_manual_report_does_not_consume_daily_quota"),
+        ("test_daily_report", "test_manual_report_test_flag_is_labelled"),
+        ("test_daily_report", "test_manual_report_without_snapshot_returns_none"),
+        ("test_commands", "test_report_command_sends_image_and_never_fetches"),
+        ("test_commands", "test_set_daily_switch_writes_override"),
+    ),
 }
 
 #: 真实群行为需人工验收的 AC（自动化仅覆盖模拟路径）
-MANUAL_ACCEPTANCE: frozenset[str] = frozenset({"AC-15", "AC-16", "AC-17", "AC-22"})
+MANUAL_ACCEPTANCE: frozenset[str] = frozenset(
+    {"AC-15", "AC-16", "AC-17", "AC-22", "AC-25", "AC-26"}
+)
 
 
 def _load(module_name: str) -> Any:
@@ -86,7 +103,7 @@ def _load(module_name: str) -> Any:
 
 
 def test_matrix_covers_every_acceptance_id() -> None:
-    expected = {f"AC-{index:02d}" for index in range(1, 25)}
+    expected = {f"AC-{index:02d}" for index in range(1, 27)}
     assert set(AC_TESTS) == expected
     assert MANUAL_ACCEPTANCE <= set(AC_TESTS)
 

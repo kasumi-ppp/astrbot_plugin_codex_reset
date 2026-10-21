@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-USER_AGENT = "astrbot-plugin-codex-reset/1.2.0 (+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)"
+USER_AGENT = "astrbot-plugin-codex-reset/1.3.0 (+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)"
 """采集请求必须携带的合规 UA（AC-19），全仓库唯一出处。"""
 
 SITE_URL = "https://codex-reset.com/"

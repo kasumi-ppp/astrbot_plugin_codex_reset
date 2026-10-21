@@ -25,12 +25,23 @@ DEFAULT_SPACING_SECONDS = 60
 MIN_SPACING_SECONDS = 60
 DEFAULT_GROUP_LIMIT = 50
 
-#: 可被群覆盖的 6 个字段（顺序固定，用于卡片读写与日志）
+#: 每日报告的全局默认值（PRD §7）
+DEFAULT_DAILY_REPORT_TIME = "09:00"
+DEFAULT_DAILY_REPORT_TIMEZONE = "Asia/Shanghai"
+DEFAULT_DAILY_REPORT_THEME = "dark"
+DEFAULT_DAILY_REPORT_RETRY_MINUTES = 5
+DEFAULT_DAILY_REPORT_EXPIRY_MINUTES = 30
+
+#: 每日报告主题的合法取值（非法值回落 dark 并告警）
+DAILY_REPORT_THEMES: tuple[str, ...] = ("dark", "light")
+
+#: 可被群覆盖的 7 个字段（顺序固定，用于卡片读写与日志）
 OVERRIDE_FIELDS: tuple[str, ...] = (
     "enable_confirmed_reset",
     "enable_watch",
     "enable_forecast",
     "enable_credits",
+    "enable_daily_report",
     "threshold_24h",
     "threshold_48h",
 )
@@ -40,6 +51,7 @@ BOOL_OVERRIDE_FIELDS: tuple[str, ...] = (
     "enable_watch",
     "enable_forecast",
     "enable_credits",
+    "enable_daily_report",
 )
 
 TRUE_TEXT = frozenset({"true", "1", "yes", "on"})
@@ -121,6 +133,65 @@ def timezone_cn_name(name: str) -> str:
     return name
 
 
+def parse_hhmm(value: object) -> tuple[int, int] | None:
+    """解析 `HH:MM`（24 小时制，允许 `9:05` 这类单位数写法）；非法返回 None。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        return None
+    hour_text, minute_text = parts[0].strip(), parts[1].strip()
+    if not hour_text.isdigit() or not minute_text.isdigit():
+        return None
+    hour, minute = int(hour_text), int(minute_text)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    return hour, minute
+
+
+def parse_theme(value: object) -> tuple[str, str | None]:
+    """解析每日报告主题；非法值回落 `dark` 并返回 warning 文本。"""
+    text = value.strip().lower() if isinstance(value, str) else ""
+    if text in DAILY_REPORT_THEMES:
+        return text, None
+    warning = (
+        f"daily_report_theme={value!r} 非法（仅 {'/'.join(DAILY_REPORT_THEMES)}），"
+        f"已回落 {DEFAULT_DAILY_REPORT_THEME}"
+    )
+    logger.warning("[codex-reset][config] %s", warning)
+    return DEFAULT_DAILY_REPORT_THEME, warning
+
+
+def _coerce_daily_time(data: Mapping[str, object], warnings: list[str]) -> str:
+    """读取 `daily_report_time`；非法回落 `09:00` 并告警。"""
+    if "daily_report_time" not in data:
+        return DEFAULT_DAILY_REPORT_TIME
+    raw = data["daily_report_time"]
+    parsed = parse_hhmm(raw)
+    if parsed is None:
+        warnings.append(
+            f"daily_report_time={raw!r} 不是合法 HH:MM，已回落 {DEFAULT_DAILY_REPORT_TIME}"
+        )
+        return DEFAULT_DAILY_REPORT_TIME
+    return f"{parsed[0]:02d}:{parsed[1]:02d}"
+
+
+def _coerce_report_timezone(data: Mapping[str, object], warnings: list[str]) -> str:
+    """读取 `daily_report_timezone`（IANA 名）；非法回落 `Asia/Shanghai` 并告警。"""
+    raw = data.get("daily_report_timezone", DEFAULT_DAILY_REPORT_TIMEZONE)
+    if not isinstance(raw, str) or not raw.strip():
+        warnings.append(
+            f"daily_report_timezone 需要字符串（收到 {raw!r}），已回落 {DEFAULT_DAILY_REPORT_TIMEZONE}"
+        )
+        return DEFAULT_DAILY_REPORT_TIMEZONE
+    _, tz_warning = parse_timezone(raw)
+    if tz_warning is not None:
+        warnings.append(tz_warning)
+        return DEFAULT_DAILY_REPORT_TIMEZONE
+    return raw.strip()
+
+
 # ---------------------------------------------------------------------------
 # 全局配置
 # ---------------------------------------------------------------------------
@@ -136,6 +207,7 @@ def build_plugin_settings(raw: Mapping[str, object] | None) -> PluginSettings:
         enable_watch=_coerce_bool(data, "enable_watch", True, warnings),
         enable_forecast=_coerce_bool(data, "enable_forecast", True, warnings),
         enable_credits=_coerce_bool(data, "enable_credits", True, warnings),
+        enable_daily_report=_coerce_bool(data, "enable_daily_report", False, warnings),
         threshold_24h=_coerce_int(data, "threshold_24h", 50, 0, 100, warnings),
         threshold_48h=_coerce_int(data, "threshold_48h", 70, 0, 100, warnings),
     )
@@ -173,6 +245,21 @@ def build_plugin_settings(raw: Mapping[str, object] | None) -> PluginSettings:
     if not show_source_link:
         warnings.append("show_source_link=false 不被支持：署名行不可关闭，渲染层仍会输出")
 
+    theme, theme_warning = parse_theme(data.get("daily_report_theme", DEFAULT_DAILY_REPORT_THEME))
+    if theme_warning is not None:
+        warnings.append(theme_warning)
+    retry_minutes = _coerce_int(
+        data, "daily_report_retry_minutes", DEFAULT_DAILY_REPORT_RETRY_MINUTES, 0, 120, warnings
+    )
+    expiry_minutes = _coerce_int(
+        data, "daily_report_expiry_minutes", DEFAULT_DAILY_REPORT_EXPIRY_MINUTES, 0, 720, warnings
+    )
+    if expiry_minutes < retry_minutes:
+        warnings.append(
+            f"daily_report_expiry_minutes={expiry_minutes} 小于 "
+            f"daily_report_retry_minutes={retry_minutes}，补发窗口内将无法完成一次重试"
+        )
+
     settings = PluginSettings(
         enable_monitor=_coerce_bool(data, "enable_monitor", True, warnings),
         defaults=defaults,
@@ -188,6 +275,13 @@ def build_plugin_settings(raw: Mapping[str, object] | None) -> PluginSettings:
         show_source_link=show_source_link,
         admin_only_subscription=_coerce_bool(data, "admin_only_subscription", True, warnings),
         group_limit=group_limit,
+        enable_daily_report=_coerce_bool(data, "enable_daily_report", False, warnings),
+        daily_report_time=_coerce_daily_time(data, warnings),
+        daily_report_timezone=_coerce_report_timezone(data, warnings),
+        daily_report_theme=theme,
+        daily_report_retry_minutes=retry_minutes,
+        daily_report_expiry_minutes=expiry_minutes,
+        daily_report_text_fallback=_coerce_bool(data, "daily_report_text_fallback", True, warnings),
         warnings=tuple(warnings),
     )
     for warning in warnings:
@@ -207,6 +301,7 @@ def parse_group_settings(raw: Mapping[str, object] | None) -> GroupSettings:
         enable_watch=_coerce_bool(data, "enable_watch", True, warnings),
         enable_forecast=_coerce_bool(data, "enable_forecast", True, warnings),
         enable_credits=_coerce_bool(data, "enable_credits", True, warnings),
+        enable_daily_report=_coerce_bool(data, "enable_daily_report", False, warnings),
         threshold_24h=_coerce_int(data, "threshold_24h", 50, 0, 100, warnings),
         threshold_48h=_coerce_int(data, "threshold_48h", 70, 0, 100, warnings),
     )
@@ -216,12 +311,13 @@ def parse_group_settings(raw: Mapping[str, object] | None) -> GroupSettings:
 
 
 def group_settings_to_dict(settings: GroupSettings) -> dict[str, object]:
-    """把完整群配置导出为 dict（6 个字段全部输出）。"""
+    """把完整群配置导出为 dict（7 个字段全部输出）。"""
     return {
         "enable_confirmed_reset": bool(settings.enable_confirmed_reset),
         "enable_watch": bool(settings.enable_watch),
         "enable_forecast": bool(settings.enable_forecast),
         "enable_credits": bool(settings.enable_credits),
+        "enable_daily_report": bool(settings.enable_daily_report),
         "threshold_24h": int(settings.threshold_24h),
         "threshold_48h": int(settings.threshold_48h),
     }
@@ -362,6 +458,12 @@ def override_to_card(
 
 
 __all__ = [
+    "DAILY_REPORT_THEMES",
+    "DEFAULT_DAILY_REPORT_EXPIRY_MINUTES",
+    "DEFAULT_DAILY_REPORT_RETRY_MINUTES",
+    "DEFAULT_DAILY_REPORT_THEME",
+    "DEFAULT_DAILY_REPORT_TIME",
+    "DEFAULT_DAILY_REPORT_TIMEZONE",
     "DEFAULT_TIME_ZONE",
     "MIN_SPACING_SECONDS",
     "OVERRIDE_FIELDS",
@@ -372,9 +474,11 @@ __all__ = [
     "override_to_json",
     "parse_group_overrides",
     "parse_group_settings",
+    "parse_hhmm",
     "parse_override",
     "parse_override_json",
     "parse_settings_json",
+    "parse_theme",
     "parse_timezone",
     "resolve_group_settings",
     "settings_to_json",

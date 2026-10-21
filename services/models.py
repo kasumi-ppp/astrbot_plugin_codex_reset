@@ -21,6 +21,14 @@ SendFn = Callable[[str, str, bool], Awaitable[bool]]
 **不接收**该参数，也绝不在文本里写「@全体成员」。返回值语义：True=平台已接受该消息，
 False=平台找不到目标会话（可重试）。"""
 
+ImageSendFn = Callable[[str, bytes, str], Awaitable[bool]]
+"""图片出站通道：`(umo, png_bytes, filename) -> bool`。
+
+只用于每日预测图片、`/cr report` 与 `/cr test image`（P01 / P09 / G09）。
+与 `SendFn` 的差别：第三参是文件名而非 `at_all`——预测图片**永不** `@全体成员`（G04）。
+返回值语义与 `SendFn` 一致：True=平台已接受，False=明确失败（可降级文本）。
+抛出 `TimeoutError` 表示结果不确定，调用方**不得**补发文本（P10）。"""
+
 
 # ---------------------------------------------------------------------------
 # 上游快照
@@ -175,6 +183,73 @@ class DeliveryTask:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     error_code: str | None = None
+    priority: int = 5
+    """投递优先级（G03）：数值越小越先发。
+
+    确认重置 = 0 → 预告/重要更正 = 1 → 权益 = 2 → 概率提醒/补发 = 3 → 其它 = 5。
+    保证「已确认全球重置」不会被同批次的低优先级消息挤到后面。
+    """
+
+
+# ---------------------------------------------------------------------------
+# 每日预测图片（P 模块）
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class ReportData:
+    """每日预测图片 / 文本降级共用的数据快照（P03/P04/P05/P11）。
+
+    所有概率与时间**直接**来自 API 快照或已入库的已确认重置记录，本结构不做任何
+    推断、补齐或默认值编造；`last_reset_at` 为 None 时渲染层必须显示「暂无记录」。
+    """
+
+    rounded_24h: int
+    rounded_48h: int
+    confidence: str
+    updated_at: datetime
+    business_date: str = ""
+    last_reset_at: datetime | None = None
+    watch_status: str = "none"  # none | watch | confirmed
+    watch_window: str | None = None
+    watch_summary: str | None = None
+    stale: bool = False
+    theme: str = "dark"
+    manual: bool = False
+    test: bool = False
+
+    def as_payload(self) -> dict[str, Any]:
+        """导出 JSON 友好的 payload（渲染器与文本降级模板共用同一份字段）。"""
+        return {
+            "business_date": self.business_date,
+            "rounded_24h": int(self.rounded_24h),
+            "rounded_48h": int(self.rounded_48h),
+            "confidence": self.confidence,
+            "updated_at": self.updated_at.isoformat(),
+            "last_reset_at": None if self.last_reset_at is None else self.last_reset_at.isoformat(),
+            "watch_status": self.watch_status,
+            "watch_window": self.watch_window,
+            "watch_summary": self.watch_summary,
+            "stale": bool(self.stale),
+            "theme": self.theme,
+            "manual": bool(self.manual),
+            "test": bool(self.test),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DailyReportRow:
+    """`daily_reports` 一行的读模型（S02「每日报告发送日期与状态」）。"""
+
+    subscription_id: str
+    business_date: str
+    status: str = "pending"
+    attempt: int = 0
+    theme: str | None = None
+    image_sha1: str | None = None
+    error_code: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    sent_at: datetime | None = None
+    next_attempt_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -192,13 +267,20 @@ class GroupOverride:
     enable_watch: bool | None = None
     enable_forecast: bool | None = None
     enable_credits: bool | None = None
+    enable_daily_report: bool | None = None
     threshold_24h: int | None = None
     threshold_48h: int | None = None
 
     def as_sparse_dict(self) -> dict[str, Any]:
         """导出仅包含「已覆盖字段」的字典（用于写入 WebUI 卡片 / JSON）。"""
         result: dict[str, Any] = {}
-        for name in ("enable_confirmed_reset", "enable_watch", "enable_forecast", "enable_credits"):
+        for name in (
+            "enable_confirmed_reset",
+            "enable_watch",
+            "enable_forecast",
+            "enable_credits",
+            "enable_daily_report",
+        ):
             value = getattr(self, name)
             if value is not None:
                 result[name] = bool(value)
@@ -215,12 +297,17 @@ class GroupOverride:
 
 @dataclass(frozen=True, slots=True)
 class GroupSettings:
-    """群级**完整生效**配置（6 个字段均有具体值）。"""
+    """群级**完整生效**配置（7 个字段均有具体值）。
+
+    `enable_daily_report` 默认 `False`：升级到 v1.3.0 时新功能默认关闭，
+    避免对已有订阅群突然产生额外的每日图片消息（PRD §7）。
+    """
 
     enable_confirmed_reset: bool = True
     enable_watch: bool = True
     enable_forecast: bool = True
     enable_credits: bool = True
+    enable_daily_report: bool = False
     threshold_24h: int = 50
     threshold_48h: int = 70
 
@@ -243,6 +330,13 @@ class PluginSettings:
     show_source_link: bool = True
     admin_only_subscription: bool = True
     group_limit: int = 50
+    enable_daily_report: bool = False
+    daily_report_time: str = "09:00"
+    daily_report_timezone: str = "Asia/Shanghai"
+    daily_report_theme: str = "dark"
+    daily_report_retry_minutes: int = 5
+    daily_report_expiry_minutes: int = 30
+    daily_report_text_fallback: bool = True
     warnings: tuple[str, ...] = ()
 
 
@@ -291,12 +385,18 @@ class CommandRequest:
 
 @dataclass(frozen=True, slots=True)
 class CommandReply:
-    """命令响应（`silent=True` 表示不回复）。"""
+    """命令响应（`silent=True` 表示不回复）。
+
+    `image` 非空时由 `main.py` 额外发送一张 PNG（`/cr report` 与 `/cr test image`）；
+    图片发送**明确失败**则退化为 `text`（P10），结果不确定则不再补发。
+    """
 
     text: str
     silent: bool = False
     error: str | None = None
     audit: dict[str, Any] | None = None
+    image: bytes | None = None
+    image_name: str = "codex-reset-forecast.png"
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +543,7 @@ __all__ = [
     "Baseline",
     "CommandReply",
     "CommandRequest",
+    "DailyReportRow",
     "DeliveryTask",
     "FeedSnapshot",
     "FetchResult",
@@ -451,12 +552,14 @@ __all__ = [
     "ForecastState",
     "GroupOverride",
     "GroupSettings",
+    "ImageSendFn",
     "IngestOutcome",
     "LatestAlert",
     "LogicalEvent",
     "ParseResult",
     "PluginSettings",
     "ReadModel",
+    "ReportData",
     "SendFn",
     "SnapshotRow",
     "SubscriptionRow",

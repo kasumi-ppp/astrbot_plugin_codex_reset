@@ -20,7 +20,7 @@ from services.models import PluginSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 
-#: PRD §5 冻结的 18 个全局字段 + `group_overrides`（共 19 个键）
+#: PRD §7 冻结的 25 个全局字段 + `group_overrides`（v1.3.0 新增 7 个每日报告字段）
 GLOBAL_FIELDS: dict[str, tuple[str, Any]] = {
     "enable_monitor": ("bool", True),
     "enable_confirmed_reset": ("bool", True),
@@ -40,6 +40,13 @@ GLOBAL_FIELDS: dict[str, tuple[str, Any]] = {
     "allow_at_all": ("bool", False),
     "show_source_link": ("bool", True),
     "admin_only_subscription": ("bool", True),
+    "enable_daily_report": ("bool", False),
+    "daily_report_time": ("string", "09:00"),
+    "daily_report_timezone": ("string", "Asia/Shanghai"),
+    "daily_report_theme": ("string", "dark"),
+    "daily_report_retry_minutes": ("int", 5),
+    "daily_report_expiry_minutes": ("int", 30),
+    "daily_report_text_fallback": ("bool", True),
 }
 
 OVERRIDE_CARD_FIELDS: tuple[str, ...] = (
@@ -50,6 +57,7 @@ OVERRIDE_CARD_FIELDS: tuple[str, ...] = (
     "enable_watch",
     "enable_forecast",
     "enable_credits",
+    "enable_daily_report",
     "threshold_24h",
     "threshold_48h",
 )
@@ -95,7 +103,7 @@ def _parse_metadata(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def test_schema_has_exactly_the_frozen_fields() -> None:
     schema = _schema()
-    assert len(schema) == 19
+    assert len(schema) == len(GLOBAL_FIELDS) + 1
     assert set(schema) == {*GLOBAL_FIELDS, "group_overrides"}
 
     for name, (expected_type, expected_default) in GLOBAL_FIELDS.items():
@@ -130,7 +138,9 @@ def test_schema_group_overrides_template_list_structure() -> None:
     for hidden in ("subscription_id", "group_name", "_version"):
         assert items[hidden]["invisible"] is True, hidden
     assert items["_version"]["type"] == "int"
-    for name in ("enable_confirmed_reset", "enable_watch", "enable_forecast", "enable_credits"):
+    for name in (
+        "enable_confirmed_reset", "enable_watch", "enable_forecast", "enable_credits", "enable_daily_report"
+    ):
         assert items[name]["type"] == "bool"
     for name in ("threshold_24h", "threshold_48h"):
         assert items[name]["type"] == "int"
@@ -156,7 +166,7 @@ def test_metadata_yaml_is_parseable_and_correct() -> None:
     metadata = _parse_metadata((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_codex_reset"
     assert metadata["display_name"] == "Codex 重置雷达"
-    assert metadata["version"] == "v1.2.0"
+    assert metadata["version"] == "v1.3.0"
     assert metadata["author"] == "kasumi-ppp"
     assert metadata["repo"] == "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
     assert metadata["astrbot_version"] == ">=4.16,<5"
@@ -172,7 +182,7 @@ def test_main_py_compiles_and_declares_plugin() -> None:
     compile(source, "main.py", "exec")  # 语法错误会直接抛
     assert '@register(\n    PLUGIN_NAME,' in source or '@register(PLUGIN_NAME' in source
     assert 'PLUGIN_NAME = "astrbot_plugin_codex_reset"' in source
-    assert 'PLUGIN_VERSION = "1.2.0"' in source
+    assert 'PLUGIN_VERSION = "1.3.0"' in source
     # 单指令 + GreedyStr 手工分派（不用 command_group）
     assert '@filter.command("cr", alias={"codexreset"})' in source
     assert "GreedyStr" in source

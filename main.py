@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -26,7 +27,7 @@ from uuid import uuid4
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import At
+from astrbot.api.message_components import At, Image
 from astrbot.api.star import Context, Star, register
 
 if __package__:
@@ -85,7 +86,7 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
 PLUGIN_DESC = "读取 codex-reset.com 公开数据，向订阅群推送重置确认、预告、概率与权益动态"
@@ -93,6 +94,8 @@ PLUGIN_DESC = "读取 codex-reset.com 公开数据，向订阅群推送重置确
 DB_FILENAME = "codex_reset.db"
 AUDIT_DIRNAME = "audit"
 POLL_TICK_SECONDS = 5.0
+DAILY_REPORT_TICK_SECONDS = 30.0
+"""每日报告调度 tick：窗口内 30s 一拍，足够灵敏且不空转（P01/G08）。"""
 
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 """常驻心跳的最小写入间隔（判据阈值 `2×spacing` 最少 120s，30s 足够且不制造 WAL 写放大）。"""
@@ -357,6 +360,8 @@ class CodexResetRadar(Star):
             settings_provider=self.current_settings,
             tz_provider=self.current_timezone,
             hooks=hooks,
+            image_send=self._send_image,
+            readonly_provider=lambda: self._readonly,
         )
         self._commands = CommandService(
             repo=repo,
@@ -366,6 +371,7 @@ class CodexResetRadar(Star):
             clock=self.clock,
             tz_provider=self.current_timezone,
             readonly_provider=lambda: self._readonly,
+            daily=self._pipeline,
         )
 
         if not self._readonly:
@@ -393,6 +399,10 @@ class CodexResetRadar(Star):
         else:
             self._tasks.append(
                 asyncio.create_task(self._delivery_loop(), name="codex-reset-delivery")
+            )
+            # 每日预测图片调度（P01）：与实时监控、投递队列相互独立
+            self._tasks.append(
+                asyncio.create_task(self._daily_report_loop(), name="codex-reset-daily-report")
             )
         # 配置热更新任务**始终**创建（即使 enable_monitor=false）：
         # 否则「先关监控、之后在 WebUI 打开」要重启才生效（PRD §5）。
@@ -498,6 +508,22 @@ class CodexResetRadar(Star):
             raise
         except Exception:  # pragma: no cover
             logger.error("[codex-reset][main] 投递循环异常退出", exc_info=True)
+
+    async def _daily_report_loop(self) -> None:
+        """每日预测图片循环（P01 / G08）：30s 一拍，异常一律捕获，绝不冒泡。"""
+        if self._pipeline is None:  # pragma: no cover - initialize 保证非空
+            return
+        while not self._stopping:
+            try:
+                await self._pipeline.run_daily_reports(self.clock.utcnow())
+            except asyncio.CancelledError:  # pragma: no cover - 上层取消
+                raise
+            except Exception:
+                logger.error("[codex-reset][main] 每日报告轮次失败", exc_info=True)
+            try:
+                await asyncio.sleep(DAILY_REPORT_TICK_SECONDS)
+            except asyncio.CancelledError:  # pragma: no cover
+                raise
 
     def _start_poll_task(self) -> None:
         """启动采集任务（已在运行则跳过，保证幂等）。"""
@@ -725,6 +751,69 @@ class CodexResetRadar(Star):
             logger.error("[codex-reset][main] 发送失败 umo_hash=%s", _hash(umo), exc_info=True)
             return False
 
+    async def _send_image(self, umo: str, png: bytes, filename: str) -> bool:
+        """把 PNG 送到指定会话（每日预测图片 / `/cr report` / `/cr test image`）。
+
+        返回值语义与 `SendFn` 一致：True=平台已接受；False=明确失败（可降级文本）；
+        `TimeoutError` 原样抛出（结果不确定，调用方不得补发文本，P10）。
+        """
+        try:
+            component = self._image_component(png, filename)
+            if component is None:
+                logger.error(
+                    "[codex-reset][main] 图片组件构造失败 umo_hash=%s name=%s",
+                    _hash(umo),
+                    filename,
+                )
+                return False
+            chain = MessageChain()
+            chain.chain.append(component)
+            return bool(await self.context.send_message(umo, chain))
+        except TimeoutError:
+            raise
+        except Exception:
+            logger.error(
+                "[codex-reset][main] 图片发送失败 umo_hash=%s name=%s",
+                _hash(umo),
+                filename,
+                exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _image_component(png: bytes, filename: str) -> Any:
+        """构造 AstrBot 图片组件；三种构造方式依次尝试，全部失败返回 None。
+
+        P08：图片由本地 Pillow 生成，不需要外链；优先 `fromBytes`（零磁盘 I/O），
+        其次 `fromBase64`，最后临时文件 `fromFileSystem`。
+        """
+        if not png:
+            return None
+        factory = getattr(Image, "fromBytes", None)
+        if callable(factory):
+            try:
+                return factory(png)
+            except Exception:  # pragma: no cover - 版本差异
+                logger.warning("[codex-reset][main] Image.fromBytes 失败，尝试 base64", exc_info=True)
+        factory = getattr(Image, "fromBase64", None)
+        if callable(factory):
+            try:
+                return factory(base64.b64encode(png).decode("ascii"))
+            except Exception:  # pragma: no cover - 版本差异
+                logger.warning("[codex-reset][main] Image.fromBase64 失败，尝试临时文件", exc_info=True)
+        try:
+            tmp_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = filename.replace("/", "_").replace("\\", "_") or "report.png"
+            path = tmp_dir / safe_name
+            path.write_bytes(png)
+            factory = getattr(Image, "fromFileSystem", None)
+            if callable(factory):
+                return factory(str(path))
+        except Exception:  # pragma: no cover - 磁盘/权限问题
+            logger.error("[codex-reset][main] 图片临时文件写入失败", exc_info=True)
+        return None
+
     # ------------------------------------------------------------------
     # 命令注册（单指令 + GreedyStr 手工分派）
     # ------------------------------------------------------------------
@@ -749,6 +838,22 @@ class CodexResetRadar(Star):
             text = reply.text or ""
             if subcommand == "help" and self._short_name_conflict:
                 text = f"{text}\n{SHORT_NAME_HINT}" if text else SHORT_NAME_HINT
+            if reply.image:
+                # P09 / P10 / G09：先发图；明确失败才降级文本，结果不确定不补发
+                umo = str(getattr(event, "unified_msg_origin", "") or "")
+                try:
+                    sent = await self._send_image(umo, reply.image, reply.image_name)
+                except TimeoutError:
+                    sent = None  # 不确定：既不重发图片也不补发文本
+                if sent is False:
+                    fallback = text or "图片发送失败。"
+                    if fallback:
+                        yield event.plain_result(fallback)
+                elif sent is True:
+                    return
+                elif not text:
+                    yield event.plain_result("图片发送结果未知，请用 /cr groups 查看推送健康。")
+                return
             if text:
                 yield event.plain_result(text)
         except Exception:

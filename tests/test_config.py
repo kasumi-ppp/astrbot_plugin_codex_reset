@@ -200,13 +200,14 @@ def test_parse_settings_json_broken_text_falls_back() -> None:
     assert parse_settings_json("[1,2]") == GroupSettings()
 
 
-def test_group_settings_to_dict_has_all_six_fields() -> None:
+def test_group_settings_to_dict_has_all_seven_fields() -> None:
     payload = group_settings_to_dict(GroupSettings())
     assert set(payload) == {
         "enable_confirmed_reset",
         "enable_watch",
         "enable_forecast",
         "enable_credits",
+        "enable_daily_report",
         "threshold_24h",
         "threshold_48h",
     }

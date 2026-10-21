@@ -1,4 +1,4 @@
-# 验收矩阵（AC-01 ~ AC-24）
+# 验收矩阵（AC-01 ~ AC-26）
 
 本文件与 `tests/test_acceptance_matrix.py` 的 `AC_TESTS` 字典**同源**：左侧「自动化测试节点」列必须
 一一对应真实存在的测试函数，`tests/test_acceptance_matrix.py::test_every_mapped_test_function_exists`
@@ -39,12 +39,20 @@
 | AC-22 | `/cr test` | `test_commands::test_test_command_is_labelled_and_writes_nothing` | 待验收（模拟测试已覆盖） |
 | AC-23 | 网站字段缺失或出现新枚举值 | `test_parser::test_parse_event_missing_required_fields_never_raises`<br>`test_parser::test_parse_event_unknown_group_is_preserved_but_flagged` | 通过 |
 | AC-24 | 并发管理指令与轮询同时更新状态 | `test_dedupe::test_concurrent_enqueue_creates_single_row`<br>`test_dedupe::test_ten_concurrent_run_once_only_one_delivery` | 通过 |
+| AC-25 | 每日预测图片：定时发送、每群每天至多一张、重启不重复、陈旧不发、降级正确 | `test_daily_report::test_daily_report_sends_once_per_group_per_day`<br>`test_daily_report::test_daily_reports_survive_reopen`<br>`test_daily_report::test_daily_report_stale_data_is_skipped_with_error`<br>`test_daily_report::test_daily_report_text_fallback_on_image_failure`<br>`test_daily_report::test_daily_report_uncertain_send_never_retries_or_falls_back` | 待验收（模拟测试已覆盖） |
+| AC-26 | 群级日报开关与手动/测试图片通道 | `test_daily_report::test_daily_report_respects_group_switch`<br>`test_daily_report::test_manual_report_does_not_consume_daily_quota`<br>`test_daily_report::test_manual_report_test_flag_is_labelled`<br>`test_daily_report::test_manual_report_without_snapshot_returns_none`<br>`test_commands::test_report_command_sends_image_and_never_fetches`<br>`test_commands::test_set_daily_switch_writes_override` | 待验收（模拟测试已覆盖） |
 
-统计：自动化 `通过` 20 条，`待验收（模拟测试已覆盖）` 4 条（AC-15 / AC-16 / AC-17 / AC-22）。
+统计：自动化 `通过` 20 条，`待验收（模拟测试已覆盖）` 6 条
+（AC-15 / AC-16 / AC-17 / AC-22 / AC-25 / AC-26）。
+
+> **v1.3.0 注意**：AC-25 / AC-26 的自动化只验证「假时钟 + 假图片发送通道」下的逻辑。
+> 真实 QQ 群中的**图片能否正常显示**（OneBot 图片上传、大小限制、风控）、
+> 以及**每天定时是否真的发出**、**重启后是否真的不重复**，必须在真实环境人工确认，
+> 在此之前两条 AC 一律记为 `待验收`，**不得**标记为端到端通过。
 
 ## 2. 人工联调清单（真实群 / 真实重启）
 
-以下四项必须在装好插件的真实 AstrBot 实例、真实 QQ 群中执行，并把结论（含失败样本与日志）
+以下各项必须在装好插件的真实 AstrBot 实例、真实 QQ 群中执行，并把结论（含失败样本与日志）
 回填到本文档「人工验收记录」小节。任一项未做，即视为该 AC **未通过**。
 
 | ID | 操作步骤 | 期望结果 | 状态 |
@@ -53,14 +61,16 @@
 | AC-16 | ① 管理员 `/cr subscribe` 后确认能收到通知；② 管理员 `/cr unsubscribe` | ② 回复退订成功文案；③ 之后不再收到任何自动通知；④ WebUI「群订阅覆盖」卡片中该群条目消失 | 待验收 |
 | AC-17 | ① `/cr subscribe` 并等到至少一条真实通知；② `docker restart` AstrBot（保留 `plugin_data` 卷）；③ 重启后观察 30 分钟 | 订阅关系与已有投递记录保留；重启后**不**重发历史事件；启动日志出现 `bootstrap` / `requeue` 相关记录；`uncertain` 状态的投递被标记而非静默丢弃 | 待验收 |
 | AC-22 | 管理员在**未订阅**群执行 `/cr test` | 仅当前会话（当前群）收到带「测试」标记的单条消息；`deliveries` 表无新增行；真实事件状态不变；随后 60s 内再次执行被限频拒绝 | 待验收 |
+| AC-25 | ① 装好中文字体，`enable_daily_report=true` 且本群 `/cr set daily on`；② 等到一个 `daily_report_time`（默认 09:00）自然触发；③ 次日 09:00 前 `docker restart` 一次 | ② 该群当天收到**一张** 900×1200 预测图片，含 24h/48h 概率、最近确认重置/「暂无记录」、更新时间、置信度、`数据来源：https://codex-reset.com/`；③ 重启后当天**不再**重复发送同一张图；数据陈旧（`max_source_age_minutes`）时当天不发图且落 `skipped` 记录；缺字体时降级为文本卡片且内容一致 | 待验收 |
+| AC-26 | ① 管理员 `/cr set daily on` 后 `/cr report`；② 未订阅群执行 `/cr report`；③ `/cr set daily off` 后等下一个定时点；④ 管理员 `/cr test image` | ① 立即收到图片，且**不占用**当天自动额度（定时点仍会再发一次自动图）；② 报「未订阅」；③ 该群当日不再收到自动图片；④ 收到带「测试图片」标记的图片，`daily_reports` 无新增行，真实事件不受影响 | 待验收 |
 
 ## 3. 人工验收记录
 
 | 日期 | 执行人 | AstrBot 版本 | 插件版本 | 覆盖 AC | 结论 | 备注 / 日志路径 |
 | --- | --- | --- | --- | --- | --- | --- |
-| （待填） | | | v1.2.0 | AC-15/16/17/22 | | |
+| （待填） | | | v1.3.0 | AC-15/16/17/22/25/26 | | |
 
-## 3.1 已知限制（V1.2 明确不修，上线前请知悉）
+## 3.1 已知限制（上线前请知悉）
 
 | # | 限制 | 影响 | 规避方式 |
 | --- | --- | --- | --- |
@@ -68,6 +78,8 @@
 | L-2 | **exactly-once 不保证**：发送超时或进程被强杀时，该条投递记为 `uncertain`，不自动重发 | 极端情况下漏一条通知 | `/cr groups` 查看 `uncertain` 计数；`/cr history` 可人工补查 |
 | L-3 | **只读实例接受查询但拒绝写指令**：`/cr subscribe`、`/cr unsubscribe`、`/cr set` 返回「只读模式」 | 需要在只读实例上改配置时会失败 | 在持锁实例上执行，或先停止多余实例 |
 | L-4 | `runtime:shutdown_at` 为 V1.2 新格式 `{owner}\|{iso}`；旧格式（纯时间戳）**不被信任** | 从更早的内部测试版本升级后，首次启动可能判定为只读 | 正常重启一次即可接管（进程会写入新格式标记） |
+| L-5 | **预测图片依赖本地中文字体**：容器/精简 Linux 镜像常缺 CJK 字体 | 找不到字体时该次日报降级为文本卡片，不会发送缺字图片 | 镜像里装 `fonts-noto-cjk`（或任意 CJK ttf/ttc），或接受文本降级 |
+| L-6 | **图片发送结果未知时既不重发图片也不补发文本**（记为 `uncertain`） | OneBot 上传超时等场景下，极端情况当天没有收到图片 | 用 `/cr report` 手工补发；本行为与既有 `uncertain` 语义一致，是为了避免重复刷屏 |
 
 ## 4. 复现命令
 

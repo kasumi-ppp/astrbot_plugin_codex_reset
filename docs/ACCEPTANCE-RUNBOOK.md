@@ -16,7 +16,7 @@
 | 0.1 | AstrBot `>=4.16,<5` | `docker logs <CT> 2>&1 \| head -30`；或 WebUI「关于」 | 升级镜像。低于 4.16 时 `GreedyStr` 分派异常，`/cr set p24 60` 第三参会被框架丢弃 |
 | 0.2 | 平台为 `aiocqhttp`（NapCat/OneBot v11） | WebUI「消息平台」适配器类型 | `metadata.yaml` 只声明 `aiocqhttp`；换平台则 `umo` 平台段不是 `aiocqhttp`，`@全体` 永不生效（§F-2） |
 | 0.3 | 插件目录名恰为 `astrbot_plugin_codex_reset` | `docker exec <CT> ls <AD>/plugins` | 改名会连带 `<AD>/plugin_data/<目录名>` 变更，历史订阅/去重状态「看起来丢了」 |
-| 0.4 | WebUI 已启用且显示 `v1.2.0` | WebUI「插件」页 | 未启用则 `initialize()` 不跑，所有指令回「插件尚未初始化完成，请稍后重试。」 |
+| 0.4 | WebUI 已启用且显示 `v1.3.0` | WebUI「插件」页 | 未启用则 `initialize()` 不跑，所有指令回「插件尚未初始化完成，请稍后重试。」 |
 | 0.5 | `<AD>/plugin_data` 在**持久卷** | `docker inspect <CT> --format '{{json .Mounts}}'` | 未持久化 → 重建即丢订阅与去重态，AC-16/17 无法判定 |
 | 0.6 | 数据目录已生成 | `docker exec <CT> ls -l <AD>/plugin_data/astrbot_plugin_codex_reset` | 应有 `codex_reset.db`(+`-wal`/`-shm`) 与 `audit/`；缺则看日志 `[codex-reset][main] 初始化` |
 | 0.7 | 1 个测试群 + 1 个**非管理员**成员 + 1 个 AstrBot 管理员 | 管理员判定是 `event.is_admin()`，**与 QQ 群主/群管无关** | 全是管理员则先加普通成员小号，否则 AC-15 无法判定 |
@@ -367,22 +367,42 @@ python -m pytest tests/test_scheduler.py tests/test_client.py -q
 | AC-16 | 「能收到/不再收到」是跨时间的群内可观测事实 |
 | AC-17 | 真实强杀时机、WAL 落盘、持久卷挂载无法等价模拟 |
 | AC-22 | 「群里只收到一条」需真实发送路径；模拟只能断言 `deliveries` 计数 |
+| **AC-25** | 图片需经真实 OneBot 上传链路（大小/格式/风控），且「每天真的发出、重启后不重复」是跨天跨进程的可观测事实 |
+| **AC-26** | 「手动 /cr report 不占用当天额度」「`/cr set daily off` 后当天不再收图」需跨两个定时点观察 |
 | F-1 只读 | 依赖两个真实进程/真实心跳时间窗 |
 | F-2 `@全体` | `At(qq="all")` 能否真 @ 到人取决于适配器与群设置 |
 | F-3 退避 | 需真实网络失败与真实 429/502 |
 | F-4 时区 | 需真实配置热更新链路 |
 
 **已由自动化覆盖，不要重复劳动**：AC-01~14、18~21、23、24（映射见 `docs/ACCEPTANCE.md` §1，
-左列「自动化测试节点」可逐条点开）。复现：
+左列「自动化测试节点」可逐条点开）。AC-25/26 的自动化只跑通**逻辑**，
+仍需按 §9.1 在真机上过一遍。复现：
 
 ```bash
 cd E:/project/Astrbot/astrbot_plugin_codex_reset
-E:/Anaconda3/python.exe -m pytest tests -q                             # 编写本文时：428 passed
+E:/Anaconda3/python.exe -m pytest tests -q                             # 编写本文时：477 passed
 E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵节点存在性校验
 ```
 
-⚠️ **自动化绿 ≠ AC 通过**：AC-15/16/17/22 在矩阵中仍为 `待验收（模拟测试已覆盖）`，
-只有本执行单填完并回填 §3 记录后才能改为「通过」。
+⚠️ **自动化绿 ≠ AC 通过**：AC-15/16/17/22/25/26 在矩阵中仍为 `待验收（模拟测试已覆盖）`，
+只有本执行单填完并回填 `docs/ACCEPTANCE.md` §3 记录后才能改为「通过」。
+
+### 9.1 每日预测图片（AC-25 / AC-26）真机步骤
+
+前置：容器里装了 CJK 字体（`fc-list | grep -i cjk` 有输出），否则图片只会降级成文本。
+
+| 步 | 操作 | 期望 | 失败则记 |
+| --- | --- | --- | --- |
+| P-1 | 全局 `enable_daily_report=true`；群 A 执行 `/cr set daily on` | 回显「每日预测图片 → 开启」，WebUI 卡片同步 | AC-26 FAIL |
+| P-2 | 群 A 执行 `/cr report` | 立即收到一张 PNG（900×1200），含 24h/48h 概率与来源署名 | AC-26 FAIL（先查字体与 `Pillow` 是否安装） |
+| P-3 | 记录当天 `daily_reports` 行：`SELECT * FROM daily_reports;` | **没有** P-2 产生的行（手动不占额度） | AC-26 FAIL |
+| P-4 | 等到一个真实 `daily_report_time`（默认 09:00） | 群 A 收到**一张**自动图片；再次 `SELECT` 应看到 `status='sent'` | AC-25 FAIL |
+| P-5 | 在到期窗口内 `docker restart <CT>` 后观察 | 当天**不再**重复发图 | AC-25 FAIL |
+| P-6 | `/cr set daily off`；等次日 09:00 | 群 A 次日不再收到自动图片 | AC-26 FAIL |
+| P-7 | 未订阅群 B 执行 `/cr report` | 回「未订阅」提示 | AC-26 FAIL |
+| P-8 | 群 A 执行 `/cr test image` | 收到带「测试图片」标记的图；`daily_reports` 无新增行 | AC-26 FAIL |
+
+> P-4/P-5 需要跨天，是本版本**唯一无法在单次会话内完成**的验收项。
 
 **本文不覆盖**：多群并发（AC-13）仅建议抽查两群；>7 天长期 WAL/内存增长与审计跨月切分归长稳；
 上游字段变更（AC-23）不可主动构造，不建议为验收伪造站点响应。

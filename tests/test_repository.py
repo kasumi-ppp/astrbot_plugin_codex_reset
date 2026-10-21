@@ -14,7 +14,7 @@ from conftest import make_logical_event, run, utc
 from services.clock import FakeClock
 from services.errors import ErrorCode, SchemaTooNewError
 from services.models import Baseline, FetchResult, ForecastState, GroupOverride
-from services.repository import Repository
+from services.repository import SCHEMA_VERSION, Repository
 
 UMO = "aiocqhttp:GroupMessage:1001"
 
@@ -46,9 +46,9 @@ def _ok_fetch(endpoint: str, payload: dict[str, object], *, clock: FakeClock) ->
 # ---------------------------------------------------------------------------
 # 建表 / 版本
 # ---------------------------------------------------------------------------
-def test_schema_created_with_version_two(repo: Repository) -> None:
+def test_schema_created_with_current_version(repo: Repository) -> None:
     async def scenario() -> None:
-        assert await repo.meta_get("schema_version") == "2"
+        assert await repo.meta_get("schema_version") == str(SCHEMA_VERSION)
         conn = sqlite3.connect(repo.db_path)
         try:
             tables = {
@@ -56,6 +56,7 @@ def test_schema_created_with_version_two(repo: Repository) -> None:
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
             columns = {row[1] for row in conn.execute("PRAGMA table_info(source_snapshots)").fetchall()}
+            delivery_columns = {row[1] for row in conn.execute("PRAGMA table_info(deliveries)").fetchall()}
         finally:
             conn.close()
         expected = {
@@ -65,10 +66,12 @@ def test_schema_created_with_version_two(repo: Repository) -> None:
             "logical_events",
             "deliveries",
             "forecast_state",
+            "daily_reports",
         }
         assert expected.issubset(tables)
         assert "etag" in columns  # 架构修正：条件请求所需的 ETag 列
         assert "raw_json" in columns
+        assert "priority" in delivery_columns  # v1.3.0 G03 消息优先级
 
     run(scenario())
 
@@ -83,7 +86,7 @@ def test_schema_version_too_new_raises(tmp_path: Path, clock: FakeClock) -> None
         )
         conn.execute(
             "INSERT INTO meta (key, value, updated_at) VALUES "
-            "('schema_version', '3', '2026-10-20T00:00:00+00:00')"
+            f"('schema_version', '{SCHEMA_VERSION + 1}', '2026-10-20T00:00:00+00:00')"
         )
         conn.commit()
     finally:
@@ -100,7 +103,7 @@ def test_schema_version_missing_is_initialised(tmp_path: Path, clock: FakeClock)
 
     async def scenario() -> None:
         await repo.open()
-        assert await repo.meta_get("schema_version") == "2"
+        assert await repo.meta_get("schema_version") == str(SCHEMA_VERSION)
         await repo.close()
 
     run(scenario())

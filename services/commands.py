@@ -39,6 +39,7 @@ from .notifications import (
     confidence_cn,
     format_day,
     format_time,
+    render_daily_report_text,
     render_test,
 )
 
@@ -52,6 +53,7 @@ RATE_LIMITS: dict[str, int] = {
     "credits": 15,
     "history": 15,
     "help": 15,
+    "report": 60,
     "subscribe": 5,
     "unsubscribe": 5,
     "settings": 5,
@@ -67,7 +69,7 @@ QUERY_COMMANDS: frozenset[str] = frozenset(
 
 #: 管理指令（必须 `is_admin`）
 ADMIN_COMMANDS: frozenset[str] = frozenset(
-    {"subscribe", "unsubscribe", "settings", "set", "groups", "test"}
+    {"subscribe", "unsubscribe", "settings", "set", "groups", "test", "report"}
 )
 
 #: 会写数据库/配置的指令：只读模式（另一实例持锁）下必须拒绝（P2-10）
@@ -77,8 +79,14 @@ ADMIN_DENIED_TEXT = "仅管理员可执行该指令。使用 /cr help 查看权�
 READONLY_TEXT = "🔒 只读模式：检测到另一个插件实例正在运行，本实例仅支持查询，写操作已停用。"
 GROUP_ONLY_TEXT = "请在目标 QQ 群内执行 /cr subscribe（订阅来源必须取自真实群会话）。"
 GROUPS_PRIVATE_TEXT = "请在私聊中执行 /cr groups（群列表含推送健康信息）。"
-SET_USAGE = "用法：/cr set reset|watch|forecast|credits on|off；/cr set p24|p48 0-100 的整数"
+SET_USAGE = (
+    "用法：/cr set reset|watch|forecast|credits|daily on|off；/cr set p24|p48 0-100 的整数"
+)
 HISTORY_USAGE = "用法：/cr history [1-10]（默认 3 条，最多 10 条）"
+REPORT_USAGE = "用法：/cr report（在群内手动生成当前概率预测图片）"
+TEST_USAGE = "用法：/cr test [image]（默认文本；image 为预测图片发送测试）"
+REPORT_NO_DATA_TEXT = "暂无数据：还没有可用的预测快照，无法生成图片，请稍后再试。"
+REPORT_NOT_GROUP_TEXT = "请在群聊中执行 /cr report（预测图片面向群发送）。"
 NO_DATA_TEXT = "暂无数据：尚未完成首轮采集，请稍后再试。"
 NOT_SUBSCRIBED_TEXT = "本群尚未订阅，请管理员执行 /cr subscribe。"
 
@@ -92,6 +100,7 @@ FLAG_LABELS: tuple[tuple[str, str], ...] = (
     ("enable_watch", "预告"),
     ("enable_forecast", "预测"),
     ("enable_credits", "权益"),
+    ("enable_daily_report", "日报"),
 )
 
 FIELD_LABELS: dict[str, str] = {
@@ -99,6 +108,7 @@ FIELD_LABELS: dict[str, str] = {
     "enable_watch": "提前预告",
     "enable_forecast": "概率预测",
     "enable_credits": "额外权益",
+    "enable_daily_report": "每日预测图片",
     "threshold_24h": "24h 阈值",
     "threshold_48h": "48h 阈值",
 }
@@ -109,6 +119,7 @@ BOOL_ALIASES: dict[str, str] = {
     "watch": "enable_watch",
     "forecast": "enable_forecast",
     "credits": "enable_credits",
+    "daily": "enable_daily_report",
 }
 THRESHOLD_ALIASES: dict[str, str] = {"p24": "threshold_24h", "p48": "threshold_48h"}
 
@@ -128,7 +139,7 @@ HELP_TEXT = "\n".join(
         "📖【Codex 重置雷达 · 指令说明】",
         "",
         "查询（群成员）：",
-        "/cr 或 /cr status  监控状态与数据新鲜度",
+        "/cr 或 /cr status  监控状态、最近重置、预告状态与数据新鲜度",
         "/cr forecast      24h/48h 重置概率详情",
         "/cr latest        最近一次已确认重置",
         "/cr credits       最近额外重置权益动态",
@@ -139,15 +150,31 @@ HELP_TEXT = "\n".join(
         "/cr subscribe     订阅当前群",
         "/cr unsubscribe   取消订阅当前群",
         "/cr settings      查看本群生效配置与来源",
-        "/cr set <项> <值> 修改本群配置（reset/watch/forecast/credits on|off；p24/p48 0-100）",
+        "/cr set <项> <值> 修改本群配置（reset/watch/forecast/credits/daily on|off；p24/p48 0-100）",
+        "/cr report        手动生成当前概率预测图片（不影响每日自动日报）",
         "/cr groups        私聊查看订阅群与推送健康",
-        "/cr test          发送一条测试消息（不入库、不建立投递）",
+        "/cr test [image]  发送测试消息（image 为预测图片测试；不入库、不建立投递）",
         "",
         "备用指令：/codexreset 与 /cr 完全等价（当 /cr 被其他插件占用时使用）。",
         "权限模型：管理指令要求 AstrBot 管理员（event.is_admin）；订阅必须来自真实群会话。",
+        "每日预测图片需管理员按群执行 /cr set daily on 开启（默认关闭）。",
         "数据来自第三方站点 codex-reset.com，非官方接口，请自行判断风险。",
     ]
 )
+
+
+class DailyReportProvider(Protocol):
+    """`/cr report` 与 `/cr test image` 的图片协作方（`Pipeline` 实现）。
+
+    命令层只消费 `(png, payload)`，不感知渲染细节；`png is None` 表示没有可用
+    预测快照或渲染失败（此时 `payload` 仍可能给出，用于文本降级）。
+    """
+
+    async def manual_report_png(
+        self, *, now: datetime, test: bool = False, theme: str | None = None
+    ) -> tuple[bytes | None, dict[str, Any] | None]:
+        """手动渲染预测图片；失败或无数据返回 `(None, ...)`。"""
+        ...
 
 
 class GroupConfigSink(Protocol):
@@ -187,11 +214,14 @@ class CommandService:
         clock: Clock,
         tz_provider: Callable[[], ZoneInfo],
         readonly_provider: Callable[[], bool] | None = None,
+        daily: DailyReportProvider | None = None,
     ) -> None:
         """依赖注入；`repo` 只需提供本文件用到的仓储方法（便于测试替身）。
 
         `readonly_provider` 返回 True 时（另一实例持锁），所有**写**指令一律拒绝，
         查询指令不受影响——只读实例仍然是一个可用的查询入口。
+        `daily` 提供 `/cr report` 与 `/cr test image` 的图片渲染（缺省 None 时这两个
+        子命令回复「功能不可用」而不是崩溃）。
         """
         self._repo = repo
         self._read = read
@@ -200,6 +230,7 @@ class CommandService:
         self._clock = clock
         self._tz_provider = tz_provider
         self._readonly = readonly_provider or (lambda: False)
+        self._daily = daily
         self._last_seen: dict[tuple[str, str], float] = {}
 
     # ------------------------------------------------------------------
@@ -254,8 +285,12 @@ class CommandService:
             text = await self._set(req, plugin)
         elif sub == "groups":
             text = await self._groups(req, plugin, tz)
-        else:  # test
-            text = render_test(tz=tz, settings=plugin)
+        elif sub == "report":
+            return await self._report(req, plugin, tz)
+        elif sub == "test":
+            return await self._test(req, plugin, tz)
+        else:  # 理论不可达：`RATE_LIMITS` 与上方分支一一对应
+            text = HELP_TEXT
         return CommandReply(text=self._finalize(text))
 
     # ------------------------------------------------------------------
@@ -312,11 +347,65 @@ class CommandService:
                 + f"，最近采集 {format_time(feed.fetched_at, tz)}"
             )
         lines.append(f"订阅群数：{len(subs)}")
+        lines.append(await self._last_reset_line(tz))
+        lines.append(await self._watch_line(tz))
         lines.extend(await self._diagnostic_lines())
         if stale:
             lines.append("")
             lines.append(self._stale_line(latest, tz))
         return "\n".join(lines)
+
+    async def _last_reset_line(self, tz: ZoneInfo) -> str:
+        """`/cr status` 的「最近一次确认重置」行（C01，只读缓存与 SQLite）。"""
+        getter = getattr(self._repo, "list_events", None)
+        if callable(getter):
+            try:
+                events = await self._repo.list_events(
+                    group_kind="reset", limit=1, exclude_corrections=True
+                )
+            except Exception:  # 诊断行不得影响查询本身
+                logger.warning("[codex-reset][commands] 读取最近重置失败", exc_info=True)
+                events = []
+            if events:
+                return f"最近确认重置：{format_time(events[0].occurred_at, tz)}"
+        forecast = self._read.forecast()
+        if forecast is not None and forecast.last_reset_at is not None:
+            return f"最近确认重置：{format_time(forecast.last_reset_at, tz)}"
+        return "最近确认重置：暂无记录"
+
+    async def _watch_line(self, tz: ZoneInfo) -> str:
+        """`/cr status` 的「当前有效预告状态」行（C01）。"""
+        from .report_renderer import watch_status_text  # 局部导入避免同层循环
+
+        forecast = self._read.forecast()
+        alert = forecast.latest_alert if forecast is not None else None
+        if alert is None:
+            return "预告状态：暂无明确预告"
+        if alert.kind == "reset" and alert.state == "confirmed" and not alert.corrected:
+            line = f"预告状态：{watch_status_text('confirmed')}"
+            confirmed_at = alert.confirmed_at or alert.observed_at or alert.source_at
+            if confirmed_at is not None:
+                line = f"{line}（{format_time(confirmed_at, tz)}）"
+            return line
+        if alert.kind == "watch" and alert.state == "active":
+            line = f"预告状态：{watch_status_text('watch')}"
+            window = self._watch_window_line(alert, tz)
+            if window:
+                line = f"{line}｜{window}"
+            return line
+        return "预告状态：暂无明确预告"
+
+    @staticmethod
+    def _watch_window_line(alert: Any, tz: ZoneInfo) -> str:
+        """预告窗口短文案（无窗口时返回空串，绝不编造小时数）。"""
+        from .classifier import _window_dict  # 局部导入避免同层循环
+        from .notifications import watch_window_text
+
+        window = _window_dict(alert.window)
+        if window is None:
+            return ""
+        text = watch_window_text({"window": window}, tz)
+        return "" if text == "暂无明确预计时段" else text
 
     async def _diagnostic_lines(self) -> list[str]:
         """只读诊断行（P2-05 / F10）：基线是否建立、forecast 端点是否在失败。
@@ -605,6 +694,67 @@ class CommandService:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # 图片命令（P09 / G09）
+    # ------------------------------------------------------------------
+    async def _report(
+        self, req: CommandRequest, plugin: PluginSettings, tz: ZoneInfo
+    ) -> CommandReply:
+        """`/cr report`：手动生成当前概率预测图片（P09）。
+
+        - 只读缓存，不触发上游请求，不绕开限流（AC-21）；
+        - 不写 `daily_reports`，因此**不占用**当天自动日报的唯一发送权；
+        - 不改变定时任务的发送状态。
+        """
+        if self._daily is None:
+            return CommandReply(
+                text=self._finalize("图片功能不可用：当前实例未启用预测图片渲染。"),
+                error="report_unavailable",
+            )
+        if not req.is_group or not req.group_id:
+            return CommandReply(text=self._finalize(REPORT_NOT_GROUP_TEXT), error="not_group")
+        await self._audit(req, "report", "ok")
+        png, payload = await self._daily.manual_report_png(now=self._clock.utcnow(), test=False)
+        if png is None:
+            if payload is not None:
+                text = f"{REPORT_NO_DATA_TEXT}\n{render_daily_report_text(payload, tz=tz, settings=plugin)}"
+                return CommandReply(text=self._finalize(text), error="render_failed")
+            return CommandReply(text=self._finalize(REPORT_NO_DATA_TEXT), error="no_data")
+        text = render_daily_report_text(payload or {}, tz=tz, settings=plugin)
+        return CommandReply(text=self._finalize(text), image=png)
+
+    async def _test(self, req: CommandRequest, plugin: PluginSettings, tz: ZoneInfo) -> CommandReply:
+        """`/cr test [image]`（G09）：`image` 为预测图片发送测试，仍标注「测试」。
+
+        测试消息**不入库、不建立投递**，也不影响真实事件与日报的去重状态。
+        """
+        args = [arg.strip().lower() for arg in req.args if arg.strip()]
+        if args and args[0] not in {"image", "img", "图片"}:
+            return CommandReply(text=self._finalize(TEST_USAGE), error="bad_args")
+        if not args:
+            return CommandReply(text=render_test(tz=tz, settings=plugin))
+        if self._daily is None:
+            return CommandReply(
+                text=self._finalize("图片功能不可用：当前实例未启用预测图片渲染。"),
+                error="report_unavailable",
+            )
+        if not req.is_group or not req.group_id:
+            return CommandReply(
+                text=self._finalize("请在群聊中执行 /cr test image。"), error="not_group"
+            )
+        await self._audit(req, "test:image", "ok")
+        png, payload = await self._daily.manual_report_png(now=self._clock.utcnow(), test=True)
+        if png is None:
+            if payload is not None:
+                text = (
+                    "🧪【测试消息】图片生成失败，已降级为文本（样例，非真实事件）\n"
+                    + render_daily_report_text({**payload, "test": True}, tz=tz, settings=plugin)
+                )
+                return CommandReply(text=self._finalize(text), error="render_failed")
+            return CommandReply(text=self._finalize(REPORT_NO_DATA_TEXT), error="no_data")
+        text = render_daily_report_text({**payload, "test": True}, tz=tz, settings=plugin)
+        return CommandReply(text=self._finalize(text), image=png)
+
+    # ------------------------------------------------------------------
     # 审批 / 审计 / 渲染辅助
     # ------------------------------------------------------------------
     async def _audit(
@@ -704,6 +854,7 @@ __all__ = [
     "ADMIN_COMMANDS",
     "ADMIN_DENIED_TEXT",
     "CommandService",
+    "DailyReportProvider",
     "GroupConfigSink",
     "QUERY_COMMANDS",
     "RATE_LIMITS",

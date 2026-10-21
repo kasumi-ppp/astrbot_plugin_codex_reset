@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,11 +30,13 @@ from services.commands import (
     GROUP_ONLY_TEXT,
     GROUPS_PRIVATE_TEXT,
     HISTORY_USAGE,
+    REPORT_NO_DATA_TEXT,
     SET_USAGE,
     CommandService,
 )
+from services.config import resolve_group_settings
 from services.errors import ErrorCode
-from services.models import CommandRequest, GroupOverride, LogicalEvent
+from services.models import CommandRequest, ForecastSnapshot, GroupOverride, LogicalEvent
 from services.repository import Repository
 
 UMO = "aiocqhttp:GroupMessage:1001"
@@ -221,6 +224,106 @@ def test_test_command_is_labelled_and_writes_nothing(tmp_path: Path) -> None:
             denied = await service.handle(_request("test", is_admin=False))
             assert ADMIN_DENIED_TEXT in denied.text
             assert denied.error == "forbidden"
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# AC-26：/cr report 手动通道——出图 + 等价文本、不触网、不占日报额度
+# ---------------------------------------------------------------------------
+def test_report_command_sends_image_and_never_fetches(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, bundle, _sink, _service = await _boot(tmp_path)
+        service = CommandService(
+            repo=repo,
+            read=bundle.pipeline,
+            settings_provider=lambda: bundle.settings,
+            sink=FakeSink(),
+            clock=clock,
+            tz_provider=lambda: SHANGHAI,
+            daily=bundle.pipeline,
+        )
+        try:
+            # ① 无快照：明确「暂无数据」，且不触发任何上游请求
+            empty = await service.handle(_request("report"))
+            assert empty.error == "no_data"
+            assert REPORT_NO_DATA_TEXT in empty.text
+            assert empty.image is None
+            assert bundle.client.calls == []
+
+            # ② 注入新鲜快照后手动出图
+            now = clock.utcnow()
+            bundle.pipeline._cache["forecast"] = ForecastSnapshot(  # noqa: SLF001
+                updated_at=now - timedelta(minutes=1),
+                rounded_24h=37,
+                rounded_48h=62,
+                confidence="medium",
+                last_reset_at=None,
+                latest_alert=None,
+                fetched_at=now,
+            )
+            clock.advance(61)  # report 限频 60s
+            reply = await service.handle(_request("report"))
+            assert reply.error is None
+            assert reply.image is not None
+            assert reply.image.startswith(b"\x89PNG")
+            # 文本兜底内容同样齐全（来源署名 + 实验性声明）
+            assert "数据来源：https://codex-reset.com/" in reply.text
+            assert "实验性预测" in reply.text
+            assert bundle.client.calls == []
+
+            # ③ 手动通道不入库、不消耗当天自动日报的唯一发送权
+            assert await repo.count_deliveries() == 0
+            assert await repo.list_daily_reports(limit=10) == []
+
+            # ④ 非管理员与非群会话均被拒
+            clock.advance(61)
+            denied = await service.handle(_request("report", is_admin=False))
+            assert ADMIN_DENIED_TEXT in denied.text
+            assert denied.error == "forbidden"
+            clock.advance(61)
+            private = await service.handle(_request("report", is_group=False, group_id=""))
+            assert private.error == "not_group"
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# `/cr set daily on|off`：群级日报开关（G07 / C04）
+# ---------------------------------------------------------------------------
+def test_set_daily_switch_writes_override(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock, repo, bundle, sink, service = await _boot(tmp_path)
+        try:
+            await service.handle(_request("subscribe"))
+            clock.advance(6)
+            on = await service.handle(_request("set", ("daily", "on")))
+            assert "每日预测图片" in on.text
+            assert "开启" in on.text
+
+            clock.advance(6)
+            off = await service.handle(_request("set", ("daily", "off")))
+            assert "关闭" in off.text
+
+            stored = await repo.get_subscription("aiocqhttp:GroupMessage:1001")
+            assert stored is not None
+            # 全局默认 false：改回默认值时覆盖字段被删除，重新回到「继承」语义
+            assert stored.override.enable_daily_report is None
+            effective = resolve_group_settings(bundle.settings, stored.override)
+            assert effective.enable_daily_report is False
+
+            clock.advance(6)
+            await service.handle(_request("set", ("daily", "on")))
+            stored = await repo.get_subscription("aiocqhttp:GroupMessage:1001")
+            assert stored is not None
+            assert stored.override.enable_daily_report is True
+            effective = resolve_group_settings(bundle.settings, stored.override)
+            assert effective.enable_daily_report is True
+            assert sink.synced  # 卡片投影已刷新
         finally:
             await repo.close()
 

@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .clock import Clock
+from .clock import Clock, ensure_utc
+from .config import parse_hhmm
 from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -22,6 +25,10 @@ DEFAULT_ROTATION: tuple[str, ...] = ("forecast", "timeline", "forecast", "feed")
 BACKOFF_SCHEDULE: tuple[int, ...] = (120, 240, 480, 900)
 MAX_BACKOFF_SECONDS = 900
 MIN_BACKOFF_SECONDS = 60
+
+DEFAULT_DAILY_TIME = "09:00"
+DEFAULT_DAILY_EXPIRY_MINUTES = 30
+DEFAULT_DAILY_RETRY_MINUTES = 5
 
 
 class SourceScheduler:
@@ -190,4 +197,197 @@ class SourceScheduler:
         self._last_request_started_at = None
 
 
-__all__ = ["BACKOFF_SCHEDULE", "DEFAULT_ROTATION", "MAX_BACKOFF_SECONDS", "SourceScheduler"]
+class DailyReportScheduler:
+    """每日预测图片的「业务日期 + 发送窗口」计算器（P01 / P02 / G08）。
+
+    只做纯时间计算，不做任何 I/O 与发送判定：
+    - 业务日期按 `daily_report_timezone`（默认 Asia/Shanghai）取自然日；
+    - 发送窗口 = `[当日 scheduled_at, scheduled_at + expiry_minutes]`；
+    - 窗口外（含错过整窗）一律不补发，避免在不合适的时间推送过期内容。
+    """
+
+    def __init__(
+        self,
+        *,
+        time_text: str = DEFAULT_DAILY_TIME,
+        time_zone: Any,
+        expiry_minutes: int = DEFAULT_DAILY_EXPIRY_MINUTES,
+        retry_minutes: int = DEFAULT_DAILY_RETRY_MINUTES,
+        clock: Clock | None = None,
+    ) -> None:
+        """`time_zone` 为 IANA 名或 `ZoneInfo`；非法时区由上层回落（config 层已校验）。"""
+        self._zone = _as_zone(time_zone)
+        self._retry_minutes = max(0, int(retry_minutes))
+        self._expiry_minutes = max(0, int(expiry_minutes))
+        self._clock = clock
+        # 先给出与 `configure` 内部一致的初始值，避免首次 configure 比较未定义属性
+        self._hour, self._minute = parse_hhmm(DEFAULT_DAILY_TIME) or (9, 0)
+        self._time_text = f"{self._hour:02d}:{self._minute:02d}"
+        self.configure(time_text=time_text)
+
+    # ------------------------------------------------------------------
+    # 配置
+    # ------------------------------------------------------------------
+    def configure(
+        self,
+        *,
+        time_text: str,
+        expiry_minutes: int | None = None,
+        retry_minutes: int | None = None,
+        time_zone: Any = None,
+    ) -> None:
+        """热更新发送时间 / 窗口 / 时区（P02：修改后立即重算下一次运行时间）。
+
+        配置未变化时静默返回：调度器每 30s 会被 pipeline 重建/刷新一次，
+        若每次都写 INFO 日志会把日志刷满。
+        """
+        parsed = parse_hhmm(time_text)
+        if parsed is None:
+            logger.warning(
+                "[codex-reset][scheduler] daily_report_time=%r 非法，回落 %s",
+                time_text,
+                DEFAULT_DAILY_TIME,
+            )
+            parsed = parse_hhmm(DEFAULT_DAILY_TIME) or (9, 0)
+        zone = _as_zone(time_zone) if time_zone is not None else self._zone
+        expiry = max(0, int(expiry_minutes)) if expiry_minutes is not None else self._expiry_minutes
+        retry = max(0, int(retry_minutes)) if retry_minutes is not None else self._retry_minutes
+        unchanged = (
+            parsed == (self._hour, self._minute)
+            and zone.key == self._zone.key
+            and expiry == self._expiry_minutes
+            and retry == self._retry_minutes
+        )
+        self._hour, self._minute = parsed
+        self._time_text = f"{self._hour:02d}:{self._minute:02d}"
+        self._zone = zone
+        self._expiry_minutes = expiry
+        self._retry_minutes = retry
+        if unchanged:
+            return
+        logger.info(
+            "[codex-reset][scheduler] daily report time=%s tz=%s expiry=%smin retry=%smin",
+            self._time_text,
+            self._zone.key,
+            self._expiry_minutes,
+            self._retry_minutes,
+        )
+
+    # ------------------------------------------------------------------
+    # 只读属性
+    # ------------------------------------------------------------------
+    @property
+    def time_text(self) -> str:
+        """规范化后的 `HH:MM`。"""
+        return self._time_text
+
+    @property
+    def time_zone(self) -> ZoneInfo:
+        """调度时区。"""
+        return self._zone
+
+    @property
+    def expiry_minutes(self) -> int:
+        """最大补发窗口（分钟）。"""
+        return self._expiry_minutes
+
+    @property
+    def retry_minutes(self) -> int:
+        """明确失败后的重试间隔（分钟）。"""
+        return self._retry_minutes
+
+    # ------------------------------------------------------------------
+    # 时间计算
+    # ------------------------------------------------------------------
+    def business_date(self, now: datetime) -> str:
+        """调度时区下的业务日期（`YYYY-MM-DD`）。"""
+        return ensure_utc(now).astimezone(self._zone).strftime("%Y-%m-%d")
+
+    def scheduled_at(self, business_date: str) -> datetime:
+        """业务日期当日的发送时刻（UTC）。"""
+        try:
+            local_day = datetime.strptime(business_date, "%Y-%m-%d").date()
+        except ValueError:
+            logger.warning(
+                "[codex-reset][scheduler] business_date=%r 非法，按今天处理", business_date
+            )
+            local_day = ensure_utc(self._clock.utcnow() if self._clock else datetime.now(UTC))
+            local_day = local_day.astimezone(self._zone).date()
+        local = datetime(
+            local_day.year, local_day.month, local_day.day, self._hour, self._minute,
+            tzinfo=self._zone,
+        )
+        return local.astimezone(UTC)
+
+    def window_end(self, business_date: str) -> datetime:
+        """补发窗口结束时刻（`scheduled_at + expiry_minutes`）。"""
+        return self.scheduled_at(business_date) + timedelta(minutes=self._expiry_minutes)
+
+    def due_window(self, now: datetime) -> str | None:
+        """若 `now` 落在某个业务日期的发送窗口内，返回该业务日期；否则返回 None。
+
+        窗口含起点、不含终点（`start <= now < end`）：到达终点的下一秒即视为错过，
+        与「超过窗口后跳过当日报告」的语义一致。
+        """
+        moment = ensure_utc(now)
+        for offset in (0, -1):
+            # 用「今天 / 昨天」两个候选日判断，覆盖跨日窗口（如 00:00 发送、时区西移）
+            candidate = (moment + timedelta(days=offset)).astimezone(self._zone)
+            date_text = candidate.strftime("%Y-%m-%d")
+            start = self.scheduled_at(date_text)
+            if start <= moment < self.window_end(date_text):
+                return date_text
+        return None
+
+    def next_run_at(self, now: datetime) -> datetime:
+        """下一次应触发发送的时刻（含补发窗口判定，供日志与测试断言）。"""
+        moment = ensure_utc(now)
+        pending = self.due_window(moment)
+        if pending is not None:
+            return self.scheduled_at(pending)
+        for offset in (0, 1, 2):
+            candidate = (moment + timedelta(days=offset)).astimezone(self._zone)
+            date_text = candidate.strftime("%Y-%m-%d")
+            start = self.scheduled_at(date_text)
+            if start > moment:
+                return start
+        return self.window_end(self.business_date(moment))
+
+    def retry_delay_seconds(self) -> float:
+        """明确失败后的重试间隔（秒）。"""
+        return float(self._retry_minutes * 60)
+
+    def within_retry(self, last_attempt_at: datetime | None, now: datetime) -> bool:
+        """上一次失败后是否还没到重试时间。"""
+        if last_attempt_at is None:
+            return False
+        if self._retry_minutes <= 0:
+            return False
+        return ensure_utc(now) < ensure_utc(last_attempt_at) + timedelta(
+            minutes=self._retry_minutes
+        )
+
+
+def _as_zone(value: Any) -> ZoneInfo:
+    """把 IANA 名 / ZoneInfo 统一成 `ZoneInfo`；非法回落 Asia/Shanghai。"""
+    if isinstance(value, ZoneInfo):
+        return value
+    text = str(value or "").strip()
+    if text:
+        try:
+            return ZoneInfo(text)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            logger.warning("[codex-reset][scheduler] 时区 %r 非法，回落 Asia/Shanghai", value)
+    return ZoneInfo("Asia/Shanghai")
+
+
+__all__ = [
+    "BACKOFF_SCHEDULE",
+    "DEFAULT_DAILY_EXPIRY_MINUTES",
+    "DEFAULT_DAILY_RETRY_MINUTES",
+    "DEFAULT_DAILY_TIME",
+    "DEFAULT_ROTATION",
+    "DailyReportScheduler",
+    "MAX_BACKOFF_SECONDS",
+    "SourceScheduler",
+]

@@ -3,6 +3,50 @@
 本文件记录 Codex 重置雷达的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 `vMAJOR.MINOR.PATCH`。
 
+## [v1.3.0] - 2026-10-22
+
+每日概率预测图片 + 投递优先级。**图片链路尚未在真实 QQ 群验证**，见「已知限制」。
+
+### 新增
+
+- **每日预测图片**：每天 `daily_report_time`（默认 `09:00`，时区 `daily_report_timezone`）向开启的群
+  发送 900×1200 PNG 卡片，含 24h/48h 概率卡片与进度条、最近一次**已确认**全球重置（无记录显示
+  「暂无记录」）、官方预告状态、数据更新时间、模型置信度、实验性声明与来源署名。
+  - **深浅双主题**：`daily_report_theme = dark`（深色科技风）/ `light`（浅色简洁风）。
+  - **每群每天至多一张**：新增 `daily_reports` 表，`(subscription_id, business_date)` 为主键；
+    到期窗口内每 30s 巡检补发，重启后不会重复发送当天图片。
+  - **文本降级**：渲染失败（缺 CJK 字体 / 渲染异常 / 超时）时按 `daily_report_text_fallback`
+    改发等价文本卡片；**发送超时（结果未知）则记为 `uncertain` 且不再补发文本**，避免重复刷屏。
+  - **陈旧不发**：无快照或源端数据超过 `max_source_age_minutes` 时跳过并落 `skipped` 记录。
+  - **失败重试**：非终态失败按 `daily_report_retry_minutes` 重试，超过 `daily_report_expiry_minutes`
+    到期窗口后不再重发；只读实例不参与日报发送。
+- **命令**：`/cr report`（手动立即出图，不占用当日自动额度）、`/cr test image`（测试图片，不入库）、
+  `/cr set daily on|off`（群级日报开关）。
+- **两级开关**：全局 `enable_daily_report`（默认 `false`）+ 群级 `enable_daily_report` 覆盖；
+  `group_overrides` 卡片同步支持该字段。
+- **投递优先级**：`deliveries.priority`，`reset(0) < watch(1) < credits(2) < forecast/catchup(3)`，
+  领取按 `priority ASC, id ASC`，重置确认优先于其他消息。
+- **`@全体成员` 收窄为确认重置**：仅 `kind=reset` 且非更正且 `allow_at_all=true` 时才尝试 @全体成员，
+  预警 / 概率 / 权益 / 日报一律不 @。
+- **重置消息附带事件说明**：站点提供 `summary` 时追加「事件说明」一行。
+- 数据库 schema 由 `2` 升到 `3`（新增 `daily_reports` 表与 `deliveries.priority` 列，
+  v1.2 旧库自动迁移）。
+- 依赖新增 `Pillow>=10.1`（图片渲染）。
+
+### 修复
+
+- **迁移顺序**：`idx_deliveries_priority` 索引改为在 `ALTER TABLE ... ADD COLUMN priority`
+  **之后**创建。此前放在建表 DDL 里，会在旧库上让「打开数据库」直接抛
+  `no such column: priority`，导致 v1.2 → v1.3.0 升级即崩溃。
+
+### 已知限制（本次明确不修）
+
+- **AC-25 / AC-26 仍需真实 QQ 群人工联调**：自动化测试只覆盖「假时钟 + 假图片发送通道」的逻辑，
+  图片在真实 OneBot 链路上的上传/显示、定时是否真的触发、重启后是否真的不重复，
+  在此之前**不得**标记为端到端通过。
+- 图片渲染依赖运行环境存在中文字体；缺字体时降级为文本卡片。
+- 日报去重粒度为 `(群, 业务日期)`，改 `daily_report_timezone` 可能造成当天重复或跳过一次。
+
 ## [v1.2.0] - 2026-10-20
 
 首个公开版本。
@@ -64,5 +108,6 @@
 - 只读判定是**一次性**的：若持锁实例在只读实例启动后才崩溃，只读实例不会自愈，需要再重启一次（不会产生两个写者）。
 - 仅支持 `aiocqhttp` 平台的 `@全体成员`，其他平台静默省略。
 
-[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.3.0...HEAD
+[v1.3.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.2.0...v1.3.0
 [v1.2.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/releases/tag/v1.2.0

@@ -24,6 +24,55 @@
     "type": "bool",
     "default": true
   },
+  "enable_daily_report": {
+    "description": "每日预测图片总开关（全局默认值；各群可在 WebUI 卡片或 /cr set daily on|off 覆盖）",
+    "type": "bool",
+    "default": false,
+    "hint": "升级默认关闭，避免对已有订阅群突然产生额外消息；按群开启：管理员在群内执行 /cr set daily on"
+  },
+  "daily_report_time": {
+    "description": "每日预测图片发送时间（HH:MM，24 小时制）",
+    "type": "string",
+    "default": "09:00",
+    "hint": "填写 HH:MM，例如 09:00、21:30；非法值回落 09:00 并告警"
+  },
+  "daily_report_timezone": {
+    "description": "每日报告调度使用的 IANA 时区",
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "hint": "例如 Asia/Shanghai；非法值回落 Asia/Shanghai 并告警"
+  },
+  "daily_report_theme": {
+    "description": "每日预测图片主题（dark=深色科技风 / light=浅色简洁风）",
+    "type": "string",
+    "default": "dark",
+    "hint": "仅支持 dark / light，非法值回落 dark"
+  },
+  "daily_report_retry_minutes": {
+    "description": "每日图片明确发送失败后的重试间隔（分钟）",
+    "type": "int",
+    "default": 5,
+    "slider": {
+      "min": 0,
+      "max": 120,
+      "step": 1
+    }
+  },
+  "daily_report_expiry_minutes": {
+    "description": "每日图片最大补发窗口（分钟），超过窗口跳过当日报告",
+    "type": "int",
+    "default": 30,
+    "slider": {
+      "min": 0,
+      "max": 720,
+      "step": 5
+    }
+  },
+  "daily_report_text_fallback": {
+    "description": "图片渲染或发送明确失败时，是否降级为简洁文本",
+    "type": "bool",
+    "default": true
+  },
   "threshold_24h": {
     "description": "未来 24 小时概率提醒阈值（%），0 表示关闭该窗口",
     "type": "int",
@@ -153,6 +202,11 @@
             "description": "该群接收「额外权益动态」",
             "type": "bool",
             "default": true
+          },
+          "enable_daily_report": {
+            "description": "该群接收每日预测图片",
+            "type": "bool",
+            "default": false
           },
           "threshold_24h": {
             "description": "该群 24h 概率阈值（%）",

@@ -25,6 +25,7 @@ from .config import override_to_json, parse_override_json
 from .errors import ErrorCode, PluginError, SchemaTooNewError
 from .models import (
     Baseline,
+    DailyReportRow,
     DeliveryTask,
     FetchResult,
     ForecastState,
@@ -33,10 +34,11 @@ from .models import (
     SnapshotRow,
     SubscriptionRow,
 )
+from .notifications import event_priority_for
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -78,6 +80,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
   attempt INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   sent_at TEXT, error_code TEXT, message_hash TEXT,
+  priority INTEGER NOT NULL DEFAULT 5,
   UNIQUE (subscription_id, logical_id, state_version));
 CREATE INDEX IF NOT EXISTS idx_deliveries_queue ON deliveries(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_sub ON deliveries(subscription_id, created_at DESC);
@@ -91,6 +94,17 @@ CREATE TABLE IF NOT EXISTS forecast_state (
   epoch_seq INTEGER NOT NULL DEFAULT 0, alert_seq INTEGER NOT NULL DEFAULT 0,
   last_prob_24h INTEGER, last_prob_48h INTEGER,
   last_sample_at TEXT, updated_at TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS daily_reports (
+  subscription_id TEXT NOT NULL REFERENCES subscriptions(subscription_id) ON DELETE CASCADE,
+  business_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempt INTEGER NOT NULL DEFAULT 0,
+  theme TEXT, image_sha1 TEXT, error_code TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  sent_at TEXT, next_attempt_at TEXT,
+  PRIMARY KEY (subscription_id, business_date));
+CREATE INDEX IF NOT EXISTS idx_daily_reports_date ON daily_reports(business_date, status);
 """
 
 
@@ -230,19 +244,37 @@ class Repository:
     async def _ensure_columns(self) -> None:
         """旧库补列：SQLite 不支持 `ADD COLUMN IF NOT EXISTS`，只能先查 `table_info`。
 
-        改动 3（`alert_seq`）必须对批次 A/B 之前建的库生效，否则旧部署升级后
-        写 `forecast_state` 会因缺列直接失败。
+        - `forecast_state.alert_seq`（v1.2 批次 A/B 之前的库）；
+        - `deliveries.priority`（v1.3.0 G03 消息优先级，兼容迁移默认 5）。
+
+        注意：索引必须**在补列之后**创建 —— 旧库的 `deliveries` 表没有 `priority` 列，
+        若把 `idx_deliveries_priority` 放进 `_DDL`，`executescript` 会先因「no such column」失败。
         """
         conn = self._connection()
         cursor = await conn.execute("PRAGMA table_info(forecast_state)")
         rows = await cursor.fetchall()
         await cursor.close()
         columns = {str(row["name"]) for row in rows}
-        if "alert_seq" not in columns:
+        if columns and "alert_seq" not in columns:
             await conn.execute(
                 "ALTER TABLE forecast_state ADD COLUMN alert_seq INTEGER NOT NULL DEFAULT 0"
             )
             logger.info("[codex-reset][repo] migrate forecast_state + alert_seq")
+
+        cursor = await conn.execute("PRAGMA table_info(deliveries)")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        columns = {str(row["name"]) for row in rows}
+        if columns and "priority" not in columns:
+            await conn.execute(
+                "ALTER TABLE deliveries ADD COLUMN priority INTEGER NOT NULL DEFAULT 5"
+            )
+            logger.info("[codex-reset][repo] migrate deliveries + priority")
+        if columns:
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_deliveries_priority"
+                " ON deliveries(status, priority, id)"
+            )
 
     async def _read_schema_version(self) -> int | None:
         conn = self._connection()
@@ -845,8 +877,13 @@ class Repository:
         ev: LogicalEvent,
         status: str = "pending",
         next_attempt_at: datetime | None = None,
+        priority: int | None = None,
     ) -> bool:
-        """入队；`UNIQUE(subscription_id, logical_id, state_version)` 保证同群同版本只入队一次。"""
+        """入队；`UNIQUE(subscription_id, logical_id, state_version)` 保证同群同版本只入队一次。
+
+        `priority` 缺省时按事件 kind 取 `EVENT_PRIORITY`（G03：确认重置 > 预告/更正 > 权益
+        > 概率提醒/补发）。
+        """
         if isinstance(sub, SubscriptionRow):
             subscription_id = sub.subscription_id
             umo = sub.umo
@@ -856,12 +893,15 @@ class Repository:
             if row is None:
                 raise PluginError(f"订阅不存在：{subscription_id}")
             umo = row.umo
+        resolved_priority = (
+            int(priority) if priority is not None else event_priority_for(ev.kind)
+        )
         now_iso = _to_iso(self._clock.utcnow())
         async with self._tx() as conn:
             cursor = await conn.execute(
                 "INSERT INTO deliveries (subscription_id, umo, logical_id, state_version, kind,"
-                " payload_json, status, attempt, next_attempt_at, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)"
+                " payload_json, status, attempt, next_attempt_at, created_at, updated_at, priority)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)"
                 " ON CONFLICT(subscription_id, logical_id, state_version) DO NOTHING",
                 (
                     subscription_id,
@@ -874,28 +914,34 @@ class Repository:
                     _to_iso(next_attempt_at),
                     now_iso,
                     now_iso,
+                    resolved_priority,
                 ),
             )
             created = cursor.rowcount > 0
         if created:
             logger.info(
-                "[codex-reset][repo] delivery enqueued id=%s ver=%s kind=%s sub_id=%s",
+                "[codex-reset][repo] delivery enqueued id=%s ver=%s kind=%s sub_id=%s priority=%s",
                 ev.logical_id,
                 ev.state_version,
                 ev.kind,
                 subscription_id,
+                resolved_priority,
             )
         return created
 
     async def claim_pending_deliveries(self, now: datetime, limit: int = 10) -> list[DeliveryTask]:
-        """单事务认领：`pending/retry` 且到期 → `inflight` + `attempt+1`（并发安全）。"""
+        """单事务认领：`pending/retry` 且到期 → `inflight` + `attempt+1`（并发安全）。
+
+        排序按 `priority ASC, id ASC`（G03）：同一批里确认重置永远排在概率提醒/补发之前，
+        因此高优先级消息不会因为先积压了几条低优先级消息而延后。
+        """
         now_iso = _to_iso(now)
         tasks: list[DeliveryTask] = []
         async with self._tx() as conn:
             cursor = await conn.execute(
                 "SELECT * FROM deliveries WHERE status IN ('pending', 'retry')"
                 " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
-                " ORDER BY id LIMIT ?",
+                " ORDER BY priority ASC, id ASC LIMIT ?",
                 (now_iso, int(limit)),
             )
             rows = await cursor.fetchall()
@@ -1126,6 +1172,7 @@ class Repository:
             payload = json.loads(row["payload_json"])
         except (TypeError, ValueError):
             payload = {}
+        priority = row["priority"] if "priority" in row.keys() else 5
         return DeliveryTask(
             id=int(row["id"]),
             subscription_id=str(row["subscription_id"]),
@@ -1140,6 +1187,7 @@ class Repository:
             created_at=_parse_db_dt(row["created_at"]),
             updated_at=_parse_db_dt(row["updated_at"]),
             error_code=row["error_code"],
+            priority=int(priority) if priority is not None else 5,
         )
 
     # ------------------------------------------------------------------
@@ -1216,6 +1264,113 @@ class Repository:
                 (now_iso,),
             )
             return cursor.rowcount
+
+    # ------------------------------------------------------------------
+    # 每日报告（v1.3.0 P01 / G08 / S02 / S03）
+    # ------------------------------------------------------------------
+    async def claim_daily_report(
+        self,
+        subscription_id: str,
+        business_date: str,
+        *,
+        theme: str | None = None,
+    ) -> bool:
+        """占位某群某业务日期的日报；返回 True 表示本次运行拥有该 (群, 日期) 的唯一发送权。
+
+        主键 `PRIMARY KEY (subscription_id, business_date)` 是每日唯一性的**最终兜底**：
+        即使调度器因为重启/竞态重复判定，同群同日期也只会成功占位一次（AC15）。
+        """
+        now_iso = _to_iso(self._clock.utcnow())
+        async with self._tx() as conn:
+            cursor = await conn.execute(
+                "INSERT INTO daily_reports (subscription_id, business_date, status, attempt,"
+                " theme, created_at, updated_at)"
+                " VALUES (?, ?, 'pending', 0, ?, ?, ?)"
+                " ON CONFLICT(subscription_id, business_date) DO NOTHING",
+                (subscription_id, business_date, theme, now_iso, now_iso),
+            )
+            created = cursor.rowcount > 0
+        if created:
+            logger.info(
+                "[codex-reset][repo] daily_report claimed sub_id=%s date=%s",
+                subscription_id,
+                business_date,
+            )
+        return created
+
+    async def get_daily_report(self, subscription_id: str, business_date: str) -> DailyReportRow | None:
+        """读取某群某业务日期的日报行。"""
+        conn = self._connection()
+        cursor = await conn.execute(
+            "SELECT * FROM daily_reports WHERE subscription_id = ? AND business_date = ?",
+            (subscription_id, business_date),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return None if row is None else self._daily_report_from_row(row)
+
+    async def update_daily_report(
+        self,
+        subscription_id: str,
+        business_date: str,
+        *,
+        status: str,
+        error_code: str | None = None,
+        image_sha1: str | None = None,
+        next_attempt_at: datetime | None = None,
+    ) -> bool:
+        """更新日报状态并 `attempt+1`（除 `sent` 外每次推进都算一次尝试）。"""
+        now_iso = _to_iso(self._clock.utcnow())
+        bump = ", attempt=attempt+1" if status != "sent" else ""
+        set_next = _to_iso(next_attempt_at) if next_attempt_at is not None else None
+        sent_clause = ", sent_at=?" if status == "sent" else ""
+        params: list[Any] = [status, now_iso, error_code, image_sha1, set_next]
+        if status == "sent":
+            params.append(now_iso)
+        params.extend([subscription_id, business_date])
+        async with self._tx() as conn:
+            cursor = await conn.execute(
+                "UPDATE daily_reports SET status=?, updated_at=?, error_code=?, image_sha1=?,"
+                f" next_attempt_at=?{bump}{sent_clause}"
+                " WHERE subscription_id=? AND business_date=?",
+                params,
+            )
+            updated = cursor.rowcount > 0
+        if updated:
+            logger.info(
+                "[codex-reset][repo] daily_report %s sub_id=%s date=%s error=%s",
+                status,
+                subscription_id,
+                business_date,
+                error_code,
+            )
+        return updated
+
+    async def list_daily_reports(self, *, limit: int = 50) -> list[DailyReportRow]:
+        """按业务日期倒序列出日报行（诊断与测试使用）。"""
+        conn = self._connection()
+        cursor = await conn.execute(
+            "SELECT * FROM daily_reports ORDER BY business_date DESC, subscription_id LIMIT ?",
+            (max(0, int(limit)),),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [self._daily_report_from_row(row) for row in rows]
+
+    def _daily_report_from_row(self, row: aiosqlite.Row) -> DailyReportRow:
+        return DailyReportRow(
+            subscription_id=str(row["subscription_id"]),
+            business_date=str(row["business_date"]),
+            status=str(row["status"]),
+            attempt=int(row["attempt"]),
+            theme=row["theme"],
+            image_sha1=row["image_sha1"],
+            error_code=row["error_code"],
+            created_at=_parse_db_dt(row["created_at"]),
+            updated_at=_parse_db_dt(row["updated_at"]),
+            sent_at=_parse_db_dt(row["sent_at"]),
+            next_attempt_at=_parse_db_dt(row["next_attempt_at"]),
+        )
 
     # ------------------------------------------------------------------
     # 基线
