@@ -10,6 +10,12 @@
 4. 生产调度启用 0～5 秒随机抖动，普通失败含抖动最多等待 900 秒；429 遵守服务端等待要求。
 5. 修正文档中的退订指令，并将生产容器断网故障注入改为隔离测试说明。
 
+## 2026-10-21：真实服务器采集故障定位
+
+补充结论：用户使用 `urllib` 默认请求头测试时三个 API 返回 403；复测发现这不是插件实际发出的请求。容器中带插件 `User-Agent` 的 `urllib` 请求均返回 200。使用插件实际的 `aiohttp` 客户端和请求头后，三个响应均因 `Content-Encoding: br` 解码失败，抛出 `ClientPayloadError: Can not decode content-encoding: br`，被客户端归类为 `network`。显式发送 `Accept-Encoding: identity` 后，三个接口均返回 200，完整响应可读取。
+
+已在 `services/client.py` 为上游请求增加 `Accept-Encoding: identity`，并在 `tests/test_client.py` 增加请求头回归断言。现有服务器上尚未安装这个修复版本；部署新 ZIP 后需观察真实采集日志确认端到端恢复。
+
 ## 已取得证据
 
 - Windows / Python 3.13.9：`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests -q --tb=short --basetemp=<独立临时目录>`：**435 passed in 7.87s**，无跳过或预期失败。

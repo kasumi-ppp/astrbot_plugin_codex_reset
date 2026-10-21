@@ -53,6 +53,7 @@ def test_request_headers_carry_ua_and_accept() -> None:
         assert session.calls[0]["url"] == "https://codex-reset.com/api/timeline"
         assert session.calls[0]["headers"]["User-Agent"] == USER_AGENT
         assert session.calls[0]["headers"]["Accept"] == "application/json"
+        assert session.calls[0]["headers"]["Accept-Encoding"] == "identity"
         assert "If-None-Match" not in session.calls[0]["headers"]
 
     run(scenario())

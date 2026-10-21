@@ -159,7 +159,11 @@ class SourceClient:
 
         started = self._clock.monotonic()
         url = f"{self._base_url}/api/{endpoint}"
-        headers = {"Accept": "application/json", "User-Agent": self._user_agent}
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "User-Agent": self._user_agent,
+        }
         etag = self._etag_for(endpoint)
         if etag:
             headers["If-None-Match"] = etag
