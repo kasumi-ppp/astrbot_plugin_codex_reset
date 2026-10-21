@@ -39,6 +39,7 @@ from services.report_renderer import (
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
     ReportRenderError,
+    confidence_text,
     ensure_theme,
     render_report_png,
     render_report_text_lines,
@@ -136,6 +137,18 @@ def test_watch_status_text_never_invents_confirmation() -> None:
     assert watch_status_text("watch") == "存在有效预告"
     assert watch_status_text("confirmed") == "已确认重置"
     assert "已确认" not in watch_status_text("weird-state")
+
+
+def test_confidence_is_omitted_when_unreliable() -> None:
+    """P11 / C02：置信度只在有可靠数据时展示，缺失/unknown 一律整行省略且不自行推断。"""
+    assert confidence_text("low") == "低"
+    assert confidence_text("medium") == "中"
+    assert confidence_text("high") == "高"
+    for unreliable in ("unknown", "", None, "HIGH", "weird"):
+        assert confidence_text(unreliable) == ""
+    # 置信度不可靠时图片仍能正常渲染（只是少一行）
+    png = render_report_png(_report_data(confidence="unknown"), tz=SHANGHAI)
+    assert png.startswith(b"\x89PNG")
 
 
 def test_ensure_theme_falls_back_to_dark() -> None:

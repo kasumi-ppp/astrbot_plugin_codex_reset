@@ -704,6 +704,36 @@ def test_status_reports_forecast_endpoint_failure(tmp_path: Path) -> None:
     run(scenario())
 
 
+def test_status_shows_reset_probability_watch_and_updated_at(tmp_path: Path) -> None:
+    """C01：`/cr status` 四项要素齐备（最近确认重置 / 概率 / 预告状态 / 数据更新时间）。"""
+
+    async def scenario() -> None:
+        clock, repo, bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await mark_baseline_built(repo)
+            await _seed_reset(repo, "1001", "2026-10-20T02:00:00Z")
+            now = clock.utcnow()
+            bundle.pipeline._cache["forecast"] = ForecastSnapshot(  # noqa: SLF001
+                updated_at=now - timedelta(minutes=1),
+                rounded_24h=37,
+                rounded_48h=62,
+                confidence="medium",
+                last_reset_at=utc(2026, 10, 20, 2, 0),
+                latest_alert=None,
+                fetched_at=now,
+            )
+            reply = await service.handle(_request("status"))
+            assert "最新预测：24h 37% / 48h 62%" in reply.text
+            assert "统计更新：" in reply.text
+            # 11:00Z → 北京时间 19:00；且必须来自**已确认重置**事件而非权益
+            assert "最近确认重置：2026-10-20 19:00" in reply.text
+            assert "预告状态：暂无明确预告" in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
 def test_status_has_no_diagnostic_lines_when_healthy(tmp_path: Path) -> None:
     """健康状态下不得出现任何降级行（避免狼来了）。"""
 

@@ -380,7 +380,7 @@ python -m pytest tests/test_scheduler.py tests/test_client.py -q
 
 ```bash
 cd E:/project/Astrbot/astrbot_plugin_codex_reset
-E:/Anaconda3/python.exe -m pytest tests -q                             # 编写本文时：477 passed
+E:/Anaconda3/python.exe -m pytest tests -q                             # 编写本文时：479 passed
 E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵节点存在性校验
 ```
 
@@ -399,7 +399,7 @@ E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵�
 | P-4 | 等到一个真实 `daily_report_time`（默认 09:00） | 群 A 收到**一张**自动图片；再次 `SELECT` 应看到 `status='sent'` | AC-25 FAIL |
 | P-5 | 在到期窗口内 `docker restart <CT>` 后观察 | 当天**不再**重复发图 | AC-25 FAIL |
 | P-6 | `/cr set daily off`；等次日 09:00 | 群 A 次日不再收到自动图片 | AC-26 FAIL |
-| P-7 | 未订阅群 B 执行 `/cr report` | 回「未订阅」提示 | AC-26 FAIL |
+| P-7 | 未订阅群 B 执行 `/cr report` | 能出图（手动通道与 `/cr test` 同语义，不要求订阅），但该群**不会**收到自动日报 | AC-26 FAIL |
 | P-8 | 群 A 执行 `/cr test image` | 收到带「测试图片」标记的图；`daily_reports` 无新增行 | AC-26 FAIL |
 
 > P-4/P-5 需要跨天，是本版本**唯一无法在单次会话内完成**的验收项。

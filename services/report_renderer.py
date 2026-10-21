@@ -414,10 +414,14 @@ def _render(payload: Mapping[str, Any], *, tz: Any, font_path: str | None) -> by
     box = (left, y, right, y + note_height)
     _card(draw, box, colors)
     updated_text = _format_moment(payload.get("updated_at"), tz) or "未知"
-    confidence = str(payload.get("confidence") or "").strip()
-    confidence_text = CONFIDENCE_CN.get(confidence, confidence or "未知")
+    # P11：置信度只展示上游给出的 low/medium/high；缺失或未识别时**整行省略**，
+    # 绝不自行推断或用 `unknown` 之类的内部占位值顶替。
+    confidence_label = confidence_text(payload.get("confidence"))
     draw.text((left + 32, y + 26), f"数据更新时间：{updated_text}", font=body_font, fill=colors["body"])
-    draw.text((left + 32, y + 66), f"模型置信度：{confidence_text}", font=body_font, fill=colors["body"])
+    if confidence_label:
+        draw.text(
+            (left + 32, y + 66), f"模型置信度：{confidence_label}", font=body_font, fill=colors["body"]
+        )
     draw.line((left + 32, y + 112, right - 32, y + 112), fill=colors["divider"], width=2)
     note_y = y + 130
     if bool(payload.get("stale")):
@@ -475,6 +479,14 @@ def render_report_text_lines(payload: Mapping[str, Any], *, tz: Any) -> list[str
     return lines
 
 
+def confidence_text(value: Any) -> str:
+    """把上游置信度转成中文；无法确认时返回空串（**整行省略**，不自行推断）。
+
+    P11 / C02：置信度「有可靠数据时」才展示。`unknown`、缺失、未识别枚举一律不显示。
+    """
+    return CONFIDENCE_CN.get(str(value or "").strip(), "")
+
+
 def ensure_theme(value: Any) -> str:
     """把任意主题值收敛到合法主题（非法回落深色）。"""
     text = str(value or "").strip().lower()
@@ -496,6 +508,7 @@ def merge_lines(*groups: Sequence[str]) -> list[str]:
 __all__ = [
     "CANVAS_HEIGHT",
     "CANVAS_WIDTH",
+    "CONFIDENCE_CN",
     "DARK_THEME",
     "DEFAULT_THEME",
     "EXPERIMENTAL_TEXT",
@@ -508,6 +521,7 @@ __all__ = [
     "THEMES",
     "THEME_NAMES",
     "WATCH_STATUS_TEXT",
+    "confidence_text",
     "ensure_theme",
     "merge_lines",
     "render_report_png",

@@ -62,7 +62,7 @@
 | AC-17 | ① `/cr subscribe` 并等到至少一条真实通知；② `docker restart` AstrBot（保留 `plugin_data` 卷）；③ 重启后观察 30 分钟 | 订阅关系与已有投递记录保留；重启后**不**重发历史事件；启动日志出现 `bootstrap` / `requeue` 相关记录；`uncertain` 状态的投递被标记而非静默丢弃 | 待验收 |
 | AC-22 | 管理员在**未订阅**群执行 `/cr test` | 仅当前会话（当前群）收到带「测试」标记的单条消息；`deliveries` 表无新增行；真实事件状态不变；随后 60s 内再次执行被限频拒绝 | 待验收 |
 | AC-25 | ① 装好中文字体，`enable_daily_report=true` 且本群 `/cr set daily on`；② 等到一个 `daily_report_time`（默认 09:00）自然触发；③ 次日 09:00 前 `docker restart` 一次 | ② 该群当天收到**一张** 900×1200 预测图片，含 24h/48h 概率、最近确认重置/「暂无记录」、更新时间、置信度、`数据来源：https://codex-reset.com/`；③ 重启后当天**不再**重复发送同一张图；数据陈旧（`max_source_age_minutes`）时当天不发图且落 `skipped` 记录；缺字体时降级为文本卡片且内容一致 | 待验收 |
-| AC-26 | ① 管理员 `/cr set daily on` 后 `/cr report`；② 未订阅群执行 `/cr report`；③ `/cr set daily off` 后等下一个定时点；④ 管理员 `/cr test image` | ① 立即收到图片，且**不占用**当天自动额度（定时点仍会再发一次自动图）；② 报「未订阅」；③ 该群当日不再收到自动图片；④ 收到带「测试图片」标记的图片，`daily_reports` 无新增行，真实事件不受影响 | 待验收 |
+| AC-26 | ① 管理员 `/cr set daily on` 后 `/cr report`；② **未订阅**群 `/cr report`；③ `/cr set daily off` 后等下一个定时点；④ 管理员 `/cr test image`；⑤ 非管理员 `/cr report` | ① 立即收到图片，且**不占用**当天自动额度（定时点仍会再发一次自动图）；② 未订阅群也可用（手动通道与 `/cr test` 同语义），但**当天不会收到自动图**；③ 该群当日不再收到自动图片；④ 收到带「测试图片」标记的图片，`daily_reports` 无新增行，真实事件不受影响；⑤ 回「仅管理员可执行该指令」 | 待验收 |
 
 ## 3. 人工验收记录
 
