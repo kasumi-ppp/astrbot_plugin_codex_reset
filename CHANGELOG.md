@@ -3,6 +3,22 @@
 本文件记录 Codex 重置雷达的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 `vMAJOR.MINOR.PATCH`。
 
+## [Unreleased]
+
+### 文档
+
+- **README 改版**：新增居中徽章区（License / 版本 / AstrBot / 平台 / Python 共 5 枚）、每日预测图片
+  示例图、`<details>` 折叠与 GitHub Alert 提示；可见正文由 258 行精简到 203 行（-21%）。
+  命令表（15 条）与配置表（26 字段）一条未减，数据来源署名、Docker 持久卷警示、只读模式说明与
+  免责声明全部保留。
+- 权限模型、只读模式与 `shutdown_at` 语义、`uncertain` 语义、群级覆盖语义下沉至新增的
+  [`docs/usage-notes.md`](docs/usage-notes.md)；排障表保留 4 行最高频现象，其余外链到
+  `docs/ACCEPTANCE-RUNBOOK.md` §7 判读表。
+- 新增 `scripts/render_readme_preview.py`：用插件自身渲染器生成 README 示例图
+  （450×600、256 色自适应量化、约 33KB），脱离 AstrBot 可运行，重复生成字节一致。
+- README「开发与验收」补充 `docs/QA-REPORT.md` 链接；复现命令去掉本机绝对路径，改为通用
+  `python -m pytest tests -q`。
+
 ## [v1.3.0] - 2026-10-22
 
 每日概率预测图片 + 投递优先级。**图片链路尚未在真实 QQ 群验证**，见「已知限制」。

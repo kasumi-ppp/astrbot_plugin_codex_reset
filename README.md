@@ -1,64 +1,61 @@
-# Codex 重置雷达（astrbot_plugin_codex_reset）
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License: AGPL-3.0"></a>
+  <a href="https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"><img src="https://img.shields.io/badge/version-v1.3.0-brightgreen" alt="Version: v1.3.0"></a>
+  <a href="https://astrbot.app"><img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-blueviolet" alt="AstrBot: >=4.16,<5"></a>
+  <a href="https://github.com/botuniverse/onebot-11"><img src="https://img.shields.io/badge/platform-aiocqhttp%20(OneBot%20v11)-orange" alt="Platform: aiocqhttp (OneBot v11)"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-%3E%3D3.12-blue" alt="Python: >=3.12"></a>
+</p>
+
+# 🛰️ Codex 重置雷达
 
 AstrBot 插件：读取第三方站点 [codex-reset.com](https://codex-reset.com/) 的公开数据，向订阅的 QQ 群推送
 **Codex 全球重置确认、提前预警、重置概率、额外重置权益动态**四类消息。
 
-- 版本：`v1.3.0`｜作者：`kasumi-ppp`｜许可：**AGPL-3.0**
-- 平台：AstrBot `>=4.16,<5`，消息平台 `aiocqhttp`（OneBot v11）
-- 数据来源署名：每条消息都含独立一行 `数据来源：https://codex-reset.com/`（**不可关闭**，许可要求）
+- 版本 `v1.3.0`｜作者 `kasumi-ppp`｜许可 **AGPL-3.0**｜Python `>=3.12`｜AstrBot `>=4.16,<5`｜平台 `aiocqhttp`（OneBot v11）
+- 每条消息都含独立一行 `数据来源：https://codex-reset.com/`（**不可关闭**，许可要求）
 
----
-
-## 1. 功能
+## 🚀 功能
 
 | 类别 | 触发条件 | 消息措辞要点 |
 |---|---|---|
 | **F01 确认重置** | 站点 `group=reset` 且 `announcement_state=announced` 且 `confirmed=true`；或 `latest_alert` 为 `reset/confirmed`；或 `last_reset_at` 前进 | 唯一允许出现「已确认」的消息；跨端点同一事实只推 1 条 |
 | **F02 提前预警** | 站点出现新的 `latest_alert(watch/active)` | 明确「尚未确认」；无窗口时固定输出「预计窗口：暂无明确预计时段」，绝不编造小时数 |
 | **F03 概率预测** | 24h/48h 概率连续 `forecast_confirm_samples` 次达标（滞回 + 冷却 + 单日上限） | 标注「实验性预测」「不代表官方承诺」，绝不出现「已确认」「即将重置」 |
-| **F04 额外重置权益** | `group=credits` 且 `banked_state ∈ {announced, arriving, available}` | 说明「网站记录该权益已可用（不代表所有账号可用）」；`unknown` 静默入库不推送（注：`banked_grant` 仅作展示，**不参与判定**——AC-12 目标行为 `banked_grant=false`，严格按 F04 字面会破坏验收） |
+| **F04 额外重置权益** | `group=credits` 且 `banked_state ∈ {announced, arriving, available}` | 说明「网站记录该权益已可用（不代表所有账号可用）」；`unknown` 静默入库不推送（`banked_grant` 仅作展示、不参与判定，见 `docs/QA-REPORT.md` P2-08） |
 | **F07 更正** | 已推送的预告过期/被站点更正/重置被降级 | 「此前的重置预告未获确认」；同一原因只发一次；若重置确认**落在窗口内**则不再补发更正 |
 
-补充能力：
-
-- **多群订阅**：每个 QQ 群独立开关（四类通知 + 24h/48h 阈值），支持 WebUI 卡片与 `/cr set` 双向同步；
+- **多群订阅**：每群独立开关四类通知、24h/48h 阈值与每日图片，WebUI 卡片与 `/cr set` 双向同步；
 - **重启不刷屏**：`logical_events` 以 `(logical_id, state_version)` 去重，重启后历史事件不重推；
-- **启动补发**（可选）：`enable_catchup=true` 时补最近 `max_catchup_hours` 内的重置/权益，每群最多 1 条摘要；
 - **礼貌采集**：固定 UA、请求间隔 ≥60s、429 尊重 `Retry-After`、失败按 2/4/8/15 分钟退避；
-- **陈旧抑制**：`feed.stale` 或源端数据过旧时仍入库但不推送，并在查询里标注「数据可能已过时」；
-- **SQLite 持久化** + 审计 JSONL（只记操作人与 umo 指纹，不记消息正文）。
+- **陈旧抑制 + 审计**：`feed.stale` 或数据过旧时仍入库但不推送；SQLite 持久化 + 审计 JSONL（不记消息正文）。
 
-### 每日预测图片（v1.3.0 新增，默认关闭）
+### 每日预测图片（默认关闭）
 
-每天固定时间向开启了该能力的群发送一张 **900×1200 PNG** 概率预测卡片：
+每天 `daily_report_time`（默认 `09:00`，时区 `Asia/Shanghai`）向开启的群发送一张 900×1200 预测卡片：24h/48h 概率与进度条、最近一次**已确认**全球重置、官方预告状态、数据更新时间与置信度；每群每天至多一张、重启不重复，渲染失败自动降级为等价文本，数据陈旧则当天跳过。
 
-- **定时发送**：按 `daily_report_time`（默认 `09:00`）与 `daily_report_timezone`（默认 `Asia/Shanghai`）
-  计算「业务日期 + 到期窗口」，到期窗口内每 30s 巡检一次并补发；
+<img src="docs/images/daily-report-preview.png" alt="每日预测图片示例（深色主题，数据为示例值）" width="420">
+
+**示意图** · 数据为示例值，非真实预测
+
+<details>
+<summary>核心规则（点击展开）</summary>
+
+- **每群每天一张**：`(群, 业务日期)` 数据库主键兜底，重启后当天不重复；
 - **深浅双主题**：`daily_report_theme = dark`（深色科技风）/ `light`（浅色简洁风）；
-- **每群每天至多一张**：`(subscription_id, business_date)` 为主键，重启后不会重复发送当天图片；
-- **文本降级**：渲染失败（缺 CJK 字体/超时）或 `daily_report_text_fallback=true` 时改发等价文本卡片；
-- **结果已知才降级**：图片发送**超时**（结果未知）时记录 `uncertain` 且**不再补发文本**，避免重复刷屏；
-- **数据陈旧则不发**：无快照或源端数据超过 `max_source_age_minutes` 时跳过（记录 `skipped`），
-  宁可不发也不发旧数据；
-- **失败重试**：非终态失败按 `daily_report_retry_minutes` 重试，超过 `daily_report_expiry_minutes`
-  到期窗口后不再重发；
-- **只读模式不发图**：被判定为只读实例时不参与任何日报发送。
+- **文本降级**：渲染失败（缺 CJK 字体/异常/超时）或 `daily_report_text_fallback=true` 时改发等价文本；
+- **结果未知不补发**：图片发送超时记为 `uncertain`，不再补发文本，避免重复刷屏；
+- **陈旧不发 + 失败重试**：数据超 `max_source_age_minutes` 跳过并记 `skipped`；明确失败按
+  `daily_report_retry_minutes` 重试，超 `daily_report_expiry_minutes` 到期窗口后跳过当日；
+- **只读实例不发图**；`/cr report`、`/cr test image` 不占用当日自动额度。
 
-卡片内容：24h/48h 概率（含进度条）、最近一次**已确认**全球重置（无记录时显示「暂无记录」）、
-官方预告状态、数据更新时间、模型置信度（**仅**站点给出 `low/medium/high` 时显示，缺失则整行省略，
-不做任何推断）、实验性预测声明、`数据来源：https://codex-reset.com/` 与生成器署名。
+补发窗口、去重粒度与时区语义见 [`docs/usage-notes.md`](docs/usage-notes.md) §4.2，完整变更记录见 [`CHANGELOG.md`](CHANGELOG.md) 的 v1.3.0 段。
 
-依赖 **Pillow>=10.1**（已写入 `requirements.txt`）；若运行环境缺少中文字体，卡片会自动降级为文本。
+</details>
+## 📦 安装
 
----
+**方式 A：插件市场** — 在 AstrBot WebUI →「插件」→「市场」中搜索 **Codex 重置雷达**（`astrbot_plugin_codex_reset`）安装并启用。
 
-## 2. 安装
-
-### 方式 A：AstrBot 插件市场
-
-在 AstrBot WebUI →「插件」→「市场」中搜索 **Codex 重置雷达**（`astrbot_plugin_codex_reset`）安装并启用。
-
-### 方式 B：Git 克隆
+**方式 B：Git 克隆**
 
 ```bash
 cd <AstrBot>/data/plugins
@@ -66,38 +63,24 @@ git clone https://github.com/kasumi-ppp/astrbot_plugin_codex_reset.git
 pip install -r astrbot_plugin_codex_reset/requirements.txt
 ```
 
-安装后在 WebUI 插件列表中启用，并按需调整配置（见 §4）。默认情况下插件**不会**主动推送任何消息，
-需要管理员在目标群内执行 `/cr subscribe` 才会开始向该群推送。
+启用后按需调整配置（见下文「配置」）。默认**不会**主动推送任何消息，需管理员在目标群内执行
+`/cr subscribe` 才会开始向该群推送。
 
-### 数据卷持久化（Docker 必读）
+> [!IMPORTANT]
+> Docker 部署必须把 AstrBot 的 `data/` 挂为**持久卷**（`volumes: - ./data:/AstrBot/data`），
+> 否则容器重建会丢失订阅与去重状态（表现为：重新订阅后才能收到推送，且可能重复收到旧消息）。
+>
+> ```
+> data/plugin_data/astrbot_plugin_codex_reset/
+> ├── codex_reset.db     # SQLite（订阅、快照、逻辑事件、投递队列、预测状态、日报记录）
+> ├── codex_reset.db-wal
+> └── audit/audit-YYYY-MM.jsonl
+> ```
 
-插件数据默认位于 AstrBot 数据目录：
+## 💬 命令
 
-```
-data/plugin_data/astrbot_plugin_codex_reset/
-├── codex_reset.db        # SQLite（订阅、快照、逻辑事件、投递队列、预测状态、日报记录）
-├── codex_reset.db-wal
-├── codex_reset.db-shm
-└── audit/
-    └── audit-YYYY-MM.jsonl
-```
-
-使用 Docker 部署时，请把 AstrBot 的 `data/` 目录挂载为**持久卷**，否则容器重建会丢失订阅与去重状态
-（表现为：重新订阅后才能收到推送，且可能重复收到旧事件）。示例：
-
-```yaml
-services:
-  astrbot:
-    volumes:
-      - ./data:/AstrBot/data
-```
-
----
-
-## 3. 命令
-
-主指令 `/cr`，别名 `/codexreset`（完全等价）。当 `/cr` 被其他插件占用时，请改用 `/codexreset`，
-插件启动日志与 `/cr help` 都会给出该提示。
+主指令 `/cr`，别名 `/codexreset`（完全等价）；被其他插件占用时请改用 `/codexreset`，启动日志与
+`/cr help` 都会给出该提示。
 
 | 命令 | 功能 | 权限 | 限频 | 是否请求上游 |
 |---|---|---|---|---|
@@ -117,26 +100,14 @@ services:
 | `/cr test` | 当前群发送一条标注「测试」的样例消息（不入库、不建投递） | AstrBot 管理员 | 60s | 否 |
 | `/cr test image` | 发送一张标注「测试图片」的当日预测图片（不入库、不影响日报去重） | AstrBot 管理员 | 60s | 否 |
 
-所有查询命令**只读内存缓存与 SQLite**，不会触发任何上游请求，因此响应不会被采集阻塞（AC-21）。
+所有查询命令**只读内存缓存与 SQLite**，不会触发任何上游请求，响应不会被采集阻塞（AC-21）。
+管理类命令要求 `event.is_admin()`，且**订阅必须来自真实群会话**（私聊 `/cr subscribe` 会被拒绝）；
+**只读模式**下（同库另一实例在运行）只提供查询，写指令统一回复「只读模式」。
+审计、限频与 `uncertain` 语义见 [`docs/usage-notes.md`](docs/usage-notes.md)。
 
-### 权限模型
+## ⚙️ 配置
 
-1. 修改与诊断类命令（`subscribe / unsubscribe / settings / set / groups / test`）要求
-   `event.is_admin()` 为真；普通成员执行时返回「仅管理员可执行该指令。使用 /cr help 查看权限说明。」
-   并照常放行查询类命令。
-2. **订阅必须来自真实群会话**：私聊执行 `/cr subscribe` 会被拒绝（禁止用裸群号拼接 umo）。
-3. V1.2 不做 QQ 群主/群管授权；`admin_only_subscription=false` 仅为预留字段，**不会**放宽权限。
-4. 所有管理动作写入审计日志（`operator_id / umo 指纹 / action / result / UTC 时间`，无消息正文）。
-5. 限频按 `(umo, 子命令)` 计数，命中后回复剩余秒数且**不触发**任何上游请求。
-6. **只读模式**：同一 `data_dir` 上检测到另一个实例仍在运行（心跳新鲜，且没有**由它自己写出**的
-   干净退出标记）时，本实例只提供查询，`/cr subscribe`、`/cr unsubscribe`、`/cr set` 统一回复
-   「只读模式」提示，不写任何事件、不建投递、不写心跳、不改 owner。避免两个实例互相覆盖配置。
-   注：`runtime:shutdown_at` 的值形如 `{owner}|{ISO 时间}`——只认「记录里的那个实例」写的退出标记，
-   这样只读实例的退出不会把仍在运行的实例「洗白」成已退出。
-
----
-
-## 4. 配置（`_conf_schema.json`，26 个字段）
+`_conf_schema.json` 共 26 个字段，「可被群覆盖」列为「是」的可用 `/cr set` 或 WebUI 卡片按群调整。
 
 | 字段 | 类型 | 默认 | 说明 | 可被群覆盖 |
 |---|---|---|---|---|
@@ -167,92 +138,66 @@ services:
 | `admin_only_subscription` | bool | `true` | 预留字段：当前固定只放行 `event.is_admin()` | 否 |
 | `group_overrides` | template_list | `[]` | 群级配置卡片（由 `/cr subscribe` 与 `/cr set` 自动维护） | — |
 
-**有效配置 = 全局默认 ⊕ 群级覆盖**：`subscriptions.settings_json` 只保存「显式覆盖过」的字段，
-未覆盖字段继续继承全局默认，因此调整全局默认会自动影响所有未覆盖的群。
-WebUI 卡片只是编辑入口，**数据库始终是唯一真源**；卡片 `_version` 与库中 `version` 不一致时视为
-过期并忽略（不会覆盖数据库），卡片缺失则下次启动按库重新投影回填。
+**有效配置 = 全局默认 ⊕ 群级覆盖**：`subscriptions.settings_json` 只保存「显式覆盖过」的字段，未覆盖字段继续继承全局默认；`/cr set` 把值改回全局默认时会删除该覆盖字段，重新回到「继承」语义。
+每日预测图片采用**全局总开关 + 群级开关**两级：`enable_daily_report=false` 时任何群都不发送，全局开启后还需对本群 `/cr set daily on`（订阅动作本身不会自动打开日报）；`/cr report` 与 `/cr test image` 是手动/测试通道，不受这两级开关约束，也不消耗当日自动额度。群覆盖完整语义见 [`docs/usage-notes.md`](docs/usage-notes.md) §4。
 
-`/cr set` 把某个值改回全局默认时，会**删除**该覆盖字段，重新回到「继承」语义。
+## ⚠️ 局限与注意事项
 
-每日预测图片采用**全局总开关 + 群级开关**两级：`enable_daily_report=false` 时任何群都不发送；
-全局开启后，还需对本群执行 `/cr set daily on` 才会发送（订阅动作本身不会自动打开日报）。
-`/cr report` 与 `/cr test image` 是手动/测试通道，**不受**这两级开关约束，也不消耗当日自动额度。
+1. **非官方数据**：`codex-reset.com` 是第三方独立站点，接口可能变更或下线；插件对字段缺失/枚举污染做
+   fail-closed 降级，但不保证功能永久可用。
+2. **实验性预测**：24h/48h 概率由站点模型给出，插件只做阈值转发，**不代表 OpenAI 官方承诺**。
+3. **exactly-once 不可保证**：发送超时或进程被强杀时消息可能已送达但未被确认，插件记为 `uncertain`
+   并**不自动重发**，极端情况下可能漏一条；可用 `/cr groups` 查看计数。
+4. **仅 `aiocqhttp`**：`@全体成员` 仅在 `aiocqhttp` 且 `allow_at_all=true` 时以真实 `At` 组件发送。
+5. **单实例建议**：同一数据库被两个 AstrBot 实例同时写入时，去重靠唯一约束兜底，仍可能重复投递。
+6. **图片依赖中文字体**：精简 Linux 镜像常缺 CJK 字体，找不到字体时该次日报降级为文本卡片，
+   装 `fonts-noto-cjk` 即可恢复。
 
----
+完整已知限制（只读判定一次性、`uncertain` 终态语义等）见
+[`docs/ACCEPTANCE.md#31-已知限制上线前请知悉`](docs/ACCEPTANCE.md#31-已知限制上线前请知悉)。
 
-## 5. 局限性（务必阅读）
-
-1. **非官方数据**：`codex-reset.com` 是第三方独立站点，接口非官方、可能变更或下线；插件对字段缺失/
-   枚举污染做 fail-closed 降级，但不保证功能永久可用。
-2. **实验性预测**：24h/48h 概率由站点模型给出，插件只做阈值转发；**不代表 OpenAI 官方承诺**。
-3. **exactly-once 不可保证**：QQ/OneBot 侧发送超时或进程被强杀时，消息可能已送达但未被确认，
-   插件会把该条记为 `uncertain` 并**不自动重发**（避免重复刷屏），因此极端情况下可能漏一条。
-   可用 `/cr groups` 查看 `uncertain` 计数。
-4. **`uncertain` 语义**：终态，不重试、不累加错误率，仅作为可观测信号；重启时残留的 `inflight`
-   会统一转为 `uncertain`。
-5. **仅 `aiocqhttp`**：`@全体成员` 仅在 `aiocqhttp` 且 `allow_at_all=true` 时以真实 `At` 组件发送，
-   其他平台静默省略。
-6. **单实例建议**：同一数据库被两个 AstrBot 实例同时写入时，去重靠唯一约束兜底，但仍可能出现
-   重复投递；请勿在同一条数据卷上并行运行多个实例。
-7. **图片依赖字体**：预测图片用 Pillow 本地渲染，需要环境中存在中文字体（Windows 微软雅黑/黑体、
-   Linux `Noto Sans CJK`、macOS `PingFang`/`Hiragino` 等）。找不到字体时该次日报降级为文本卡片，
-   不会发送缺字图片；图片发送结果未知时按 `uncertain` 处理且不再补发文本。
-8. **日报去重粒度**：按 `(群, 业务日期)` 至多一张。业务日期以 `daily_report_timezone` 为准，
-   跨时区迁移或改时区可能造成当天重复/跳过一次。
-
----
-
-## 6. 数据来源与许可
+## 📄 数据来源与许可
 
 - 数据来源：[https://codex-reset.com/](https://codex-reset.com/)（公开 JSON：`/api/forecast`、
   `/api/timeline`、`/api/feed`）。插件仅做只读 GET，不写入、不绕过任何访问限制。
 - 每条展示上游数据的消息都包含 `数据来源：https://codex-reset.com/`，该行**不可关闭**。
-- 本项目以 **AGPL-3.0** 发布（见 `LICENSE`）。二次分发/修改需保留同样的许可与署名要求。
+- 本项目以 **AGPL-3.0** 发布（见 [`LICENSE`](LICENSE)），二次分发/修改需保留同样的许可与署名要求。
 
----
-
-## 7. 故障排查
+## 🔧 故障排查
 
 | 现象 | 排查方向 |
 |---|---|
-| 群内没有任何推送 | ① 是否执行过 `/cr subscribe`；② `enable_monitor` 是否为 `true`；③ `/cr settings` 看四类开关是否被关闭；④ `/cr status` 的「最近采集」是否长时间不更新 |
+| 群内没有任何推送 | ① 是否执行过 `/cr subscribe`；② `enable_monitor` 是否为 `true`；③ `/cr settings` 看各开关；④ `/cr status` 的「最近采集」是否长时间不更新 |
 | `/cr` 没有响应 | 可能被其他插件占用，改用 `/codexreset`；启动日志中搜索 `/cr 可能被占用` |
-| 频繁 429 / 采集被退避 | 调大 `request_spacing_seconds`（≥60），不要降低；插件已按 `Retry-After` 与 2/4/8/15 分钟退避 |
-| 大量 502 / 超时 | 站点侧问题，插件不会伪造消息；`/cr status` 会显示数据已陈旧 |
-| 时间显示不对 | 检查 `time_zone` 是否为合法 IANA 名（如 `Asia/Shanghai`），非法值会回落并写 WARNING |
 | 权限被拒 | 管理指令要求 AstrBot 管理员；`subscribe/unsubscribe` 还必须在**群会话**内执行 |
 | 重启后重复收到旧消息 | 确认 `data/plugin_data/astrbot_plugin_codex_reset` 为持久卷；否则去重状态会丢失 |
-| 指令回「只读模式」 | 同一 `data_dir` 上还有另一个 AstrBot 实例在跑（或上次异常退出没写退出标记）。停止多余实例即可；确认只有一个实例后重启，插件会写入 `runtime:shutdown_at` 并重新接管。 |
-| 想彻底重置 | 停止插件 → 删除 `codex_reset.db*` 与 `audit/` → 重启并重新 `/cr subscribe` |
-| 每天没收到预测图片 | ① 全局 `enable_daily_report` 是否为 `true`（默认 `false`）；② 本群 `/cr set daily on`；③ `daily_report_time`/`daily_report_timezone` 是否符合预期；④ `/cr report` 手工验证；⑤ 到期窗口 `daily_report_expiry_minutes` 内插件是否在线 |
-| 预测图片变成文字 | 运行环境缺少中文字体或渲染/发送已知失败，已按 `daily_report_text_fallback` 降级。安装 CJK 字体即可恢复图片；发送超时（结果未知）时既不重发图片也不补发文本 |
-| 同一天收到多张图片 | 确认只有一个 AstrBot 实例写同一数据卷；数据卷丢失也会导致去重状态丢失 |
+| 每天没收到预测图片 | ① 全局 `enable_daily_report`（默认 `false`）；② 本群 `/cr set daily on`；③ `daily_report_time`/`daily_report_timezone`；④ 用 `/cr report` 手工验证 |
+| 预测图片变成文字 | 环境缺少中文字体，或发送已知失败已按 `daily_report_text_fallback` 降级；安装 CJK 字体即可恢复 |
 
+更多现象（429/502 退避、只读模式、时间显示、`/cr test` 限频等）见
+[`docs/ACCEPTANCE-RUNBOOK.md#7-判读表`](docs/ACCEPTANCE-RUNBOOK.md#7-判读表)。
 日志统一带 `[codex-reset][模块]` 前缀，排障时建议 `grep "codex-reset"`。
 
----
-
-## 8. 开发与验收
+## 🧪 开发与验收
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) | AC-01 ~ AC-25 验收矩阵、自动化测试节点映射、人工联调清单（含真实 QQ 群联调项） |
-| [`docs/architecture.md`](docs/architecture.md) | 分层架构、数据库 schema、决策记录（D-01 ~ D-12） |
-| [`docs/PRD-confirmation.md`](docs/PRD-confirmation.md) | 需求与验收纪律来源 |
+| [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) | AC-01 ~ AC-26 验收矩阵、人工联调清单、已知限制 |
+| [`docs/ACCEPTANCE-RUNBOOK.md`](docs/ACCEPTANCE-RUNBOOK.md) | 真实环境验收执行单（含每日图片 8 步真机流程） |
+| [`docs/usage-notes.md`](docs/usage-notes.md) | 权限、只读模式、`uncertain` 语义、群级覆盖 |
+| [`docs/architecture.md`](docs/architecture.md) | 分层架构、七表 DDL、决策记录（D-01 ~ D-12） |
+| [`docs/QA-REPORT.md`](docs/QA-REPORT.md) | 历轮 QA 缺陷与修复记录 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更 |
 
 ```bash
-E:/Anaconda3/python.exe -m pytest tests -q          # 全量测试
-E:/Anaconda3/python.exe -m ruff check services tests main.py
+python -m pytest tests -q                          # 全量测试
+python -m ruff check services tests main.py scripts
 ```
 
-分层纪律：`services/**` **不得** `import astrbot`（由 `tests/test_schema.py` 守护），只有 `main.py`
-可以接触 AstrBot 框架对象；因此业务逻辑可脱离 AstrBot 独立测试。
+复现命令与环境准备见 [`docs/ACCEPTANCE.md#4-复现命令`](docs/ACCEPTANCE.md#4-复现命令)。分层纪律：`services/**` **不得** `import astrbot`（由 `tests/test_schema.py` 守护），只有 `main.py` 可以接触 AstrBot 框架对象。
 
----
+## 📢 免责声明
 
-## 9. 免责声明
-
-本插件为社区非官方工具，与 OpenAI、Anthropic 或 `codex-reset.com` 均无隶属关系。
-所有数据与预测来自第三方站点，可能不准确、延迟或中断；插件按「现状」提供，不构成任何服务承诺或
-订阅建议。因使用本插件产生的任何直接或间接损失，作者不承担责任。请自行判断是否依赖这些信息做出决策。
+本插件为社区非官方工具，与 OpenAI、Anthropic 或 `codex-reset.com` 均无隶属关系。所有数据与预测来自
+第三方站点，可能不准确、延迟或中断；插件按「现状」提供，不构成任何服务承诺或订阅建议。因使用本插件
+产生的任何直接或间接损失，作者不承担责任。请自行判断是否依赖这些信息做出决策。
