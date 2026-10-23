@@ -86,7 +86,7 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.4.0"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
 PLUGIN_DESC = "读取 codex-reset.com 公开数据，向订阅群推送重置确认、预告、概率与权益动态"

@@ -132,12 +132,18 @@ def test_bundled_font_path_and_environment_status(monkeypatch: pytest.MonkeyPatc
     # 模拟「无内置字体、有系统字体」→ 状态应回落「系统字体」
     monkeypatch.setattr(rr, "bundled_font_path", lambda: None)
     monkeypatch.setattr(
-        rr, "_resolve_system_font_path", lambda: "C:/Windows/Fonts/msyh.ttc"
+        rr, "_resolve_system_font_path", lambda: bundled
     )
     ready, status = rr.image_environment_status()
     assert ready is True and "系统字体" in status
 
+    broken = Path(bundled).parent / "LICENSE-OFL.txt"
+    monkeypatch.setattr(rr, "bundled_font_path", lambda: str(broken))
+    ready, status = rr.image_environment_status()
+    assert ready is False and "加载失败" in status
+
     # 模拟「既无内置、也无系统字体」→ 未就绪
+    monkeypatch.setattr(rr, "bundled_font_path", lambda: None)
     monkeypatch.setattr(rr, "_resolve_system_font_path", lambda: None)
     ready, status = rr.image_environment_status()
     assert ready is False and "缺少中文字体" in status
@@ -166,6 +172,7 @@ def test_text_lines_contain_all_required_elements() -> None:
     lines = render_report_text_lines(payload, tz=SHANGHAI)
     assert any("37%" in line for line in lines)
     assert any("62%" in line for line in lines)
+    assert any("模型置信度：中" in line for line in lines)
     text = render_daily_report_text(payload, tz=SHANGHAI, settings=None)
     assert "数据来源：https://codex-reset.com/" in text
     assert "实验性预测" in text

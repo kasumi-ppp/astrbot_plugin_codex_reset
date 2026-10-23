@@ -153,11 +153,14 @@ def _close_tracked_repos() -> Iterable[None]:
     yield
 
     async def _close_all() -> None:
+        errors: list[Exception] = []
         for repository in _OPEN_REPOS:
             try:
                 await repository.close()
-            except Exception:  # 清理阶段绝不阻断其他仓库的关闭
-                pass
+            except Exception as exc:  # 继续关闭其他仓库，随后报告清理失败
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("Repository 清理失败", errors)
 
     run(_close_all())
 

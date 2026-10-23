@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [v1.4.0] - 2026-10-23
+
+### 修复与改进
+
+- 内置 Noto Sans CJK SC 字体及 SIL OFL 许可证，精简 Linux 容器无需另装中文字体即可渲染深浅主题图片。
+- `/cr test image`、`/cr report` 按缺字体、字体加载失败、渲染超时等原因给出准确提示；`/cr status` 展示字体可加载状态、全局与群级日报开关。
+- 修复定时图片漏判全局开关的问题；文本降级补齐可靠的模型置信度；测试仓库关闭失败不再静默忽略。
+- 本地完整测试 489 项通过；同一 AstrBot 容器临时目录内深浅主题均生成 900×1200 PNG。真实 QQ 图片投递与跨日定时仍待人工验收。
+
 ### 文档
 
 - **README 改版**：新增居中徽章区（License / 版本 / AstrBot / 平台 / Python 共 5 枚）、每日预测图片
@@ -124,6 +133,7 @@
 - 只读判定是**一次性**的：若持锁实例在只读实例启动后才崩溃，只读实例不会自愈，需要再重启一次（不会产生两个写者）。
 - 仅支持 `aiocqhttp` 平台的 `@全体成员`，其他平台静默省略。
 
-[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.4.0...HEAD
+[v1.4.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.3.0...v1.4.0
 [v1.3.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.2.0...v1.3.0
 [v1.2.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/releases/tag/v1.2.0

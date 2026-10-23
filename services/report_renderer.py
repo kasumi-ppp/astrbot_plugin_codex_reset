@@ -195,15 +195,20 @@ def image_environment_status() -> tuple[bool, str]:
     """图片环境就绪状态（供 `/cr status` 展示）。
 
     返回 `(是否就绪, 中文说明)`：
-    - 内置字体存在 → `(True, "就绪（内置中文字体）")`；
-    - 只有系统字体 → `(True, "就绪（系统字体）")`；
-    - 均缺失 → `(False, "未就绪（缺少中文字体）")`。
+    - 内置字体可加载 → `(True, "就绪（内置中文字体）")`；
+    - 只有系统字体且可加载 → `(True, "就绪（系统字体）")`；
+    - 字体缺失或加载失败 → `(False, 原因)`。
     """
-    if bundled_font_path() is not None:
-        return True, "就绪（内置中文字体）"
-    if _resolve_system_font_path() is not None:
-        return True, "就绪（系统字体）"
-    return False, "未就绪（缺少中文字体）"
+    bundled = bundled_font_path()
+    system = None if bundled else _resolve_system_font_path()
+    path = bundled or system
+    if path is None:
+        return False, "未就绪（缺少中文字体）"
+    try:
+        ImageFont.truetype(path, 12)
+    except (OSError, ValueError):
+        return False, "未就绪（中文字体加载失败）"
+    return True, "就绪（内置中文字体）" if bundled else "就绪（系统字体）"
 
 
 class FontSet:
@@ -514,6 +519,9 @@ def render_report_text_lines(payload: Mapping[str, Any], *, tz: Any) -> list[str
         f"最近一次已确认全球重置：{reset_text}",
         f"官方预告状态：{status}",
     ]
+    confidence = confidence_text(payload.get("confidence"))
+    if confidence:
+        lines.append(f"模型置信度：{confidence}")
     if str(payload.get("watch_status")) == "watch":
         window = str(payload.get("watch_window") or "").strip()
         lines.append(f"预计窗口：{window or NO_WINDOW_TEXT}")

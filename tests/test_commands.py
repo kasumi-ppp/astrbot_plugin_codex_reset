@@ -904,7 +904,7 @@ def test_report_command_classifies_render_failures(tmp_path: Path) -> None:
     async def scenario() -> tuple[str, str, str]:
         cases = {
             "font_missing": "缺少中文字体，无法生成图片",
-            "font_error": "缺少中文字体，无法生成图片",
+            "font_error": "中文字体加载失败，无法生成图片",
             "render_timeout": "图片渲染超时",
             "render_error": "图片渲染失败",
         }

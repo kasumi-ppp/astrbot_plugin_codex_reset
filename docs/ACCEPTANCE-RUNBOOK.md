@@ -16,7 +16,7 @@
 | 0.1 | AstrBot `>=4.16,<5` | `docker logs <CT> 2>&1 \| head -30`；或 WebUI「关于」 | 升级镜像。低于 4.16 时 `GreedyStr` 分派异常，`/cr set p24 60` 第三参会被框架丢弃 |
 | 0.2 | 平台为 `aiocqhttp`（NapCat/OneBot v11） | WebUI「消息平台」适配器类型 | `metadata.yaml` 只声明 `aiocqhttp`；换平台则 `umo` 平台段不是 `aiocqhttp`，`@全体` 永不生效（§F-2） |
 | 0.3 | 插件目录名恰为 `astrbot_plugin_codex_reset` | `docker exec <CT> ls <AD>/plugins` | 改名会连带 `<AD>/plugin_data/<目录名>` 变更，历史订阅/去重状态「看起来丢了」 |
-| 0.4 | WebUI 已启用且显示 `v1.3.0` | WebUI「插件」页 | 未启用则 `initialize()` 不跑，所有指令回「插件尚未初始化完成，请稍后重试。」 |
+| 0.4 | WebUI 已启用且显示 `v1.4.0` | WebUI「插件」页 | 未启用则 `initialize()` 不跑，所有指令回「插件尚未初始化完成，请稍后重试。」 |
 | 0.5 | `<AD>/plugin_data` 在**持久卷** | `docker inspect <CT> --format '{{json .Mounts}}'` | 未持久化 → 重建即丢订阅与去重态，AC-16/17 无法判定 |
 | 0.6 | 数据目录已生成 | `docker exec <CT> ls -l <AD>/plugin_data/astrbot_plugin_codex_reset` | 应有 `codex_reset.db`(+`-wal`/`-shm`) 与 `audit/`；缺则看日志 `[codex-reset][main] 初始化` |
 | 0.7 | 1 个测试群 + 1 个**非管理员**成员 + 1 个 AstrBot 管理员 | 管理员判定是 `event.is_admin()`，**与 QQ 群主/群管无关** | 全是管理员则先加普通成员小号，否则 AC-15 无法判定 |
@@ -389,7 +389,7 @@ E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵�
 
 ### 9.1 每日预测图片（AC-25 / AC-26）真机步骤
 
-前置：容器里装了 CJK 字体（`fc-list | grep -i cjk` 有输出），否则图片只会降级成文本。
+前置：插件包带有 `resources/fonts/NotoSansCJKsc-Regular.otf` 和许可证；`/cr status` 显示「图片环境：就绪（内置中文字体）」。容器不需另装系统 CJK 字体。
 
 | 步 | 操作 | 期望 | 失败则记 |
 | --- | --- | --- | --- |

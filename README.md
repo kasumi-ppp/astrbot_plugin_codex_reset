@@ -1,6 +1,6 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License: AGPL-3.0"></a>
-  <a href="https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"><img src="https://img.shields.io/badge/version-v1.3.0-brightgreen" alt="Version: v1.3.0"></a>
+  <a href="https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"><img src="https://img.shields.io/badge/version-v1.4.0-brightgreen" alt="Version: v1.4.0"></a>
   <a href="https://astrbot.app"><img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-blueviolet" alt="AstrBot: >=4.16,<5"></a>
   <a href="https://github.com/botuniverse/onebot-11"><img src="https://img.shields.io/badge/platform-aiocqhttp%20(OneBot%20v11)-orange" alt="Platform: aiocqhttp (OneBot v11)"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-%3E%3D3.12-blue" alt="Python: >=3.12"></a>
@@ -11,7 +11,7 @@
 AstrBot 插件：读取第三方站点 [codex-reset.com](https://codex-reset.com/) 的公开数据，向订阅的 QQ 群推送
 **Codex 全球重置确认、提前预警、重置概率、额外重置权益动态**四类消息。
 
-- 版本 `v1.3.0`｜作者 `kasumi-ppp`｜许可 **AGPL-3.0**｜Python `>=3.12`｜AstrBot `>=4.16,<5`｜平台 `aiocqhttp`（OneBot v11）
+- 版本 `v1.4.0`｜作者 `kasumi-ppp`｜许可 **AGPL-3.0**｜Python `>=3.12`｜AstrBot `>=4.16,<5`｜平台 `aiocqhttp`（OneBot v11）
 - 每条消息都含独立一行 `数据来源：https://codex-reset.com/`（**不可关闭**，许可要求）
 
 ## 🚀 功能
@@ -48,7 +48,7 @@ AstrBot 插件：读取第三方站点 [codex-reset.com](https://codex-reset.com
   `daily_report_retry_minutes` 重试，超 `daily_report_expiry_minutes` 到期窗口后跳过当日；
 - **只读实例不发图**；`/cr report`、`/cr test image` 不占用当日自动额度。
 
-补发窗口、去重粒度与时区语义见 [`docs/usage-notes.md`](docs/usage-notes.md) §4.2，完整变更记录见 [`CHANGELOG.md`](CHANGELOG.md) 的 v1.3.0 段。
+补发窗口、去重粒度与时区语义见 [`docs/usage-notes.md`](docs/usage-notes.md) §4.2，完整变更记录见 [`CHANGELOG.md`](CHANGELOG.md) 的 v1.4.0 段。
 
 </details>
 ## 📦 安装
@@ -150,8 +150,8 @@ pip install -r astrbot_plugin_codex_reset/requirements.txt
    并**不自动重发**，极端情况下可能漏一条；可用 `/cr groups` 查看计数。
 4. **仅 `aiocqhttp`**：`@全体成员` 仅在 `aiocqhttp` 且 `allow_at_all=true` 时以真实 `At` 组件发送。
 5. **单实例建议**：同一数据库被两个 AstrBot 实例同时写入时，去重靠唯一约束兜底，仍可能重复投递。
-6. **图片依赖中文字体**：精简 Linux 镜像常缺 CJK 字体，找不到字体时该次日报降级为文本卡片，
-   装 `fonts-noto-cjk` 即可恢复。
+6. **图片使用内置中文字体**：插件包包含 Noto Sans CJK SC 与独立的 SIL OFL 许可证；内置字体缺失或损坏时
+   会提示具体原因并降级为文本。也可安装 `fonts-noto-cjk` 供未携带内置字体的旧包使用。
 
 完整已知限制（只读判定一次性、`uncertain` 终态语义等）见
 [`docs/ACCEPTANCE.md#31-已知限制上线前请知悉`](docs/ACCEPTANCE.md#31-已知限制上线前请知悉)。
@@ -172,7 +172,7 @@ pip install -r astrbot_plugin_codex_reset/requirements.txt
 | 权限被拒 | 管理指令要求 AstrBot 管理员；`subscribe/unsubscribe` 还必须在**群会话**内执行 |
 | 重启后重复收到旧消息 | 确认 `data/plugin_data/astrbot_plugin_codex_reset` 为持久卷；否则去重状态会丢失 |
 | 每天没收到预测图片 | ① 全局 `enable_daily_report`（默认 `false`）；② 本群 `/cr set daily on`；③ `daily_report_time`/`daily_report_timezone`；④ 用 `/cr report` 手工验证 |
-| 预测图片变成文字 | 环境缺少中文字体，或发送已知失败已按 `daily_report_text_fallback` 降级；安装 CJK 字体即可恢复 |
+| 预测图片变成文字 | 查看 `/cr status` 的「图片环境」与日志；新包应自带中文字体，缺失/损坏时重新安装完整插件包；发送失败则排查 OneBot 上传链路 |
 
 更多现象（429/502 退避、只读模式、时间显示、`/cr test` 限频等）见
 [`docs/ACCEPTANCE-RUNBOOK.md#7-判读表`](docs/ACCEPTANCE-RUNBOOK.md#7-判读表)。

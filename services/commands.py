@@ -91,7 +91,7 @@ REPORT_NOT_GROUP_TEXT = "请在群聊中执行 /cr report（预测图片面向�
 #: `manual_report_png` 渲染失败分类 → 中文提示（P10；与「图片发送失败」分层，互不叠加）
 RENDER_FAILURE_HEAD: dict[str, str] = {
     "font_missing": "缺少中文字体，无法生成图片。",
-    "font_error": "缺少中文字体，无法生成图片。",
+    "font_error": "中文字体加载失败，无法生成图片。",
     "render_timeout": "图片渲染超时。",
     "render_error": "图片渲染失败。",
 }
