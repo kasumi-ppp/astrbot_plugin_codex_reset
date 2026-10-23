@@ -108,9 +108,56 @@ def test_render_missing_font_raises_report_error(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(rr, "FONT_CANDIDATES", ())
     monkeypatch.setattr(rr, "FONT_SEARCH_DIRS", ())
+    monkeypatch.setattr(rr, "bundled_font_path", lambda: None)
     with pytest.raises(ReportRenderError) as excinfo:
         render_report_png(_report_data(), tz=SHANGHAI, font_path="Z:/definitely/missing.ttf")
     assert excinfo.value.reason == "font_missing"
+
+
+def test_bundled_font_path_and_environment_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """改动 1：`bundled_font_path()` 与 `image_environment_status()` 的契约。
+
+    包内字体存在时返回真实路径（本次已打包 NotoSansCJKsc-Regular.otf）；
+    状态函数无论字体是否存在都返回 `(bool, str)`。
+    """
+    from services import report_renderer as rr
+
+    bundled = rr.bundled_font_path()
+    assert bundled is None or Path(bundled).is_file()
+    ready, status = rr.image_environment_status()
+    assert isinstance(ready, bool) and isinstance(status, str)
+    if bundled is not None:
+        assert ready is True and "内置" in status
+
+    # 模拟「无内置字体、有系统字体」→ 状态应回落「系统字体」
+    monkeypatch.setattr(rr, "bundled_font_path", lambda: None)
+    monkeypatch.setattr(
+        rr, "_resolve_system_font_path", lambda: "C:/Windows/Fonts/msyh.ttc"
+    )
+    ready, status = rr.image_environment_status()
+    assert ready is True and "系统字体" in status
+
+    # 模拟「既无内置、也无系统字体」→ 未就绪
+    monkeypatch.setattr(rr, "_resolve_system_font_path", lambda: None)
+    ready, status = rr.image_environment_status()
+    assert ready is False and "缺少中文字体" in status
+
+
+def test_resolve_font_path_prefers_bundled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """改动 1：内置字体优先于系统字体候选。"""
+    from services import report_renderer as rr
+
+    bundled = tmp_path / "bundled.otf"
+    bundled.write_bytes(b"dummy-font-bytes")
+    monkeypatch.setattr(rr, "bundled_font_path", lambda: str(bundled))
+    monkeypatch.setattr(rr, "FONT_CANDIDATES", ("C:/Windows/Fonts/msyh.ttc",))
+    monkeypatch.setattr(rr, "FONT_SEARCH_DIRS", ())
+    assert rr._resolve_font_path() == str(bundled)  # noqa: SLF001
+
+    # 显式 `font_path` 依然最高优先级
+    explicit = tmp_path / "explicit.otf"
+    explicit.write_bytes(b"explicit-font")
+    assert rr._resolve_font_path(str(explicit)) == str(explicit)  # noqa: SLF001
 
 
 def test_text_lines_contain_all_required_elements() -> None:
@@ -265,6 +312,30 @@ def test_daily_report_status_transitions(tmp_path: Path) -> None:
         run(repo.close())
 
 
+def test_latest_daily_report_error_returns_most_recent_failure(tmp_path: Path) -> None:
+    """改动 3d：`latest_daily_report_error()` 返回最近一条 failed/uncertain 的错误码。"""
+    from conftest import make_repo
+
+    repo = make_repo(tmp_path / "daily_err.db")
+    try:
+        sub = run(create_subscription(repo))
+        assert run(repo.latest_daily_report_error()) == (None, None)
+        run(repo.claim_daily_report(sub.subscription_id, "2026-10-20"))
+        run(repo.update_daily_report(
+            sub.subscription_id, "2026-10-20", status="failed", error_code="image_send_failed"
+        ))
+        assert run(repo.latest_daily_report_error()) == ("2026-10-20", "image_send_failed")
+
+        # uncertain 也算失败原因；且按 updated_at 取最近一条
+        run(repo.claim_daily_report(sub.subscription_id, "2026-10-21"))
+        run(repo.update_daily_report(
+            sub.subscription_id, "2026-10-21", status="uncertain", error_code="timeout"
+        ))
+        assert run(repo.latest_daily_report_error()) == ("2026-10-21", "timeout")
+    finally:
+        run(repo.close())
+
+
 def test_daily_reports_survive_reopen(tmp_path: Path) -> None:
     """S03：重启后日报状态恢复。"""
     from conftest import make_repo
@@ -320,10 +391,15 @@ class RecordingImageSend:
 
 
 def bundle_settings_default() -> Any:
-    """默认 PluginSettings（独立工厂，便于按用例 `replace` 个别字段）。"""
-    from services.models import PluginSettings
+    """每日图片**已开启**的默认 PluginSettings（独立工厂，便于按用例 `replace` 个别字段）。
 
-    return PluginSettings()
+    定时图片需要「全局开关 AND 群级开关」同时生效（改动 3b），因此默认把
+    `enable_daily_report`（全局）与 `defaults.enable_daily_report`（群默认）都置 True；
+    需要测试「关闭」语义的用例再显式覆盖。
+    """
+    from services.models import GroupSettings, PluginSettings
+
+    return PluginSettings(enable_daily_report=True, defaults=GroupSettings(enable_daily_report=True))
 
 
 def _seed_forecast(pipeline: Any, now: datetime | FakeClock) -> None:
@@ -357,7 +433,7 @@ def _make_daily_pipeline(
 
     fake_clock = clock or FakeClock(utc(2026, 10, 20, 1, 5))  # 北京 09:05：窗口内
     repo = make_repo(tmp_path / f"{name}.db", clock=fake_clock)
-    bundle = make_pipeline(repo, fake_clock, settings=settings)
+    bundle = make_pipeline(repo, fake_clock, settings=settings or bundle_settings_default())
     image_send = RecordingImageSend(image_outcomes)
     bundle.pipeline._image_send = image_send  # noqa: SLF001
     bundle.pipeline._readonly_provider = lambda: readonly  # noqa: SLF001
@@ -388,12 +464,40 @@ def test_daily_report_sends_once_per_group_per_day(tmp_path: Path) -> None:
 
 
 def test_daily_report_respects_group_switch(tmp_path: Path) -> None:
-    """G02：未开启 `enable_daily_report` 的群不接收日报。"""
+    """G02：未开启 `enable_daily_report` 的群不接收日报（全局开 + 群级关）。"""
     pipeline, image_send, _, repo, _ = _make_daily_pipeline(tmp_path)
-    run(create_subscription(repo))  # 默认（继承全局 False）
+    run(create_subscription(repo, override=GroupOverride(enable_daily_report=False)))
     _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
     assert run(pipeline.run_daily_reports(utc(2026, 10, 20, 1, 5))) == 0
     assert image_send.calls == []
+
+
+def test_daily_report_respects_global_switch(tmp_path: Path) -> None:
+    """改动 3b：全局开关关闭时，即使群级已开启也不发送定时图片。"""
+    from dataclasses import replace as _replace
+
+    from services.models import GroupSettings, PluginSettings
+
+    # 全局关、群默认开（模拟只关总开关、群已开启的场景）
+    settings = PluginSettings(
+        enable_daily_report=False, defaults=GroupSettings(enable_daily_report=True)
+    )
+    pipeline, image_send, _, repo, _ = _make_daily_pipeline(tmp_path, settings=settings)
+    run(create_subscription(repo))
+    _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
+    assert run(pipeline.run_daily_reports(utc(2026, 10, 20, 1, 5))) == 0
+    assert image_send.calls == []
+
+    # 对照组：同样场景下全局开启即可发送（证明群级已生效）
+    pipeline2, image_send2, _, repo2, _ = _make_daily_pipeline(
+        tmp_path,
+        settings=_replace(settings, enable_daily_report=True),
+        name="global_on",
+    )
+    run(create_subscription(repo2))
+    _seed_forecast(pipeline2, FakeClock(utc(2026, 10, 20, 1, 4)))
+    assert run(pipeline2.run_daily_reports(utc(2026, 10, 20, 1, 5))) == 1
+    assert len(image_send2.calls) == 1
 
 
 def test_daily_report_outside_window_is_ignored(tmp_path: Path) -> None:
@@ -523,8 +627,8 @@ def test_manual_report_does_not_consume_daily_quota(tmp_path: Path) -> None:
     """P09：`/cr report` 不占用当天自动日报唯一发送权，也不改变定时任务状态。"""
     pipeline, image_send, _, repo, _ = _make_daily_pipeline(tmp_path)
     _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
-    png, payload = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
-    assert png is not None and payload is not None
+    png, payload, render_error = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+    assert png is not None and payload is not None and render_error is None
     assert png.startswith(b"\x89PNG")
     assert payload["manual"] is True and payload["test"] is False
     assert run(repo.list_daily_reports()) == []
@@ -541,15 +645,49 @@ def test_manual_report_test_flag_is_labelled(tmp_path: Path) -> None:
     """G09：`/cr test image` 的渲染带 `test=True`。"""
     pipeline, _, _, _, _ = _make_daily_pipeline(tmp_path)
     _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
-    png, payload = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5), test=True))
-    assert png is not None
+    png, payload, render_error = run(
+        pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5), test=True)
+    )
+    assert png is not None and render_error is None
     assert payload is not None and payload["test"] is True
 
 
 def test_manual_report_without_snapshot_returns_none(tmp_path: Path) -> None:
     pipeline, _, _, _, _ = _make_daily_pipeline(tmp_path)
-    png, payload = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
-    assert png is None and payload is None
+    png, payload, render_error = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+    assert png is None and payload is None and render_error is None
+
+
+def test_manual_report_classifies_render_failure_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """改动 2：`manual_report_png` 区分 font_missing / font_error / render_error / render_timeout。"""
+    import services.pipeline as pl
+
+    pipeline, _, _, _, _ = _make_daily_pipeline(tmp_path)
+    _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
+
+    for reason, expected in (
+        ("font_missing", "font_missing"),
+        ("font_error", "font_error"),
+        ("render_error", "render_error"),
+        ("bad_input", "render_error"),  # 未识别 reason 统一归为 render_error
+    ):
+        def _boom(data: Any, *, tz: Any = None, _reason: str = reason) -> bytes:
+            raise ReportRenderError("boom", reason=_reason)
+
+        monkeypatch.setattr(pl, "render_report_png", _boom)
+        png, payload, err = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+        assert png is None
+        assert payload is not None and payload["manual"] is True
+        assert err == expected
+
+    def _hang(data: Any, *, tz: Any = None) -> bytes:
+        raise TimeoutError()
+
+    monkeypatch.setattr(pl, "render_report_png", _hang)
+    png, payload, err = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+    assert png is None and payload is not None and err == "render_timeout"
 
 
 # ---------------------------------------------------------------------------

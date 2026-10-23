@@ -1357,6 +1357,24 @@ class Repository:
         await cursor.close()
         return [self._daily_report_from_row(row) for row in rows]
 
+    async def latest_daily_report_error(self) -> tuple[str | None, str | None]:
+        """返回最近一条 failed / uncertain 日报的 `(business_date, error_code)`。
+
+        只读查询（命令层 `/cr status` 展示最近图片失败原因用）；无失败记录时返回
+        `(None, None)`。`uncertain` 同样视为「值得展示的失败原因」（发送结果不确定）。
+        """
+        conn = self._connection()
+        cursor = await conn.execute(
+            "SELECT business_date, error_code FROM daily_reports"
+            " WHERE status IN ('failed', 'uncertain')"
+            " ORDER BY updated_at DESC, business_date DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None, None
+        return str(row["business_date"]), row["error_code"]
+
     def _daily_report_from_row(self, row: aiosqlite.Row) -> DailyReportRow:
         return DailyReportRow(
             subscription_id=str(row["subscription_id"]),

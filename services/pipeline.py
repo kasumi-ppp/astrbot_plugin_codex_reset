@@ -77,6 +77,11 @@ DAILY_REPORT_TERMINAL: frozenset[str] = frozenset({"sent", "uncertain", "skipped
 #: 渲染在超时后转 `uncertain` 的上限（秒）
 REPORT_RENDER_TIMEOUT_SECONDS = 20.0
 
+#: `manual_report_png` 的渲染失败分类（P10：命令层据此给出不同中文提示）
+_RENDER_ERROR_REASONS: frozenset[str] = frozenset(
+    {"font_missing", "font_error", "render_error", "render_timeout"}
+)
+
 
 class PipelineHooks(Protocol):
     """`main.py` 用于观测轮询结果的旁路回调（默认全部 no-op）。"""
@@ -889,6 +894,9 @@ class Pipeline:
         if business_date is None:
             return 0
         plugin = self._settings_provider()
+        if not plugin.enable_daily_report:
+            # 定时图片需要「全局开关 AND 群级开关」同时生效（PRD §7 / 改动 3b）
+            return 0
         sent = 0
         for sub in await self._repo.list_subscriptions():
             if not sub.enabled:
@@ -1056,19 +1064,24 @@ class Pipeline:
 
     async def manual_report_png(
         self, *, now: datetime, test: bool = False, theme: str | None = None
-    ) -> tuple[bytes | None, dict[str, Any] | None]:
+    ) -> tuple[bytes | None, dict[str, Any] | None, str | None]:
         """`/cr report` / `/cr test image` 手动渲染（P09 / G09）。
 
         只读缓存，不触发上游请求（AC-21）；不写 `daily_reports`，因此**不占用**
         当天自动日报的唯一发送权，也不改变定时任务状态。
-        返回 `(png, payload)`；没有可用预测快照时返回 `(None, None)`。
+
+        返回 `(png, payload, render_error_reason)`：
+        - 没有可用预测快照 → `(None, None, None)`（命令层应提示「暂无数据」）；
+        - 渲染失败 → `(None, payload, reason)`，`reason` 取值
+          `font_missing` / `font_error` / `render_error` / `render_timeout`，
+          供命令层给出不同的中文提示（P10 失败分类）。
         """
         moment = ensure_utc(now)
         data = await self.build_report_data(
             moment, theme=theme, manual=not test, test=test
         )
         if data is None:
-            return None, None
+            return None, None, None
         payload = data.as_payload()
         try:
             png = await asyncio.wait_for(
@@ -1076,12 +1089,18 @@ class Pipeline:
                 timeout=REPORT_RENDER_TIMEOUT_SECONDS,
             )
         except ReportRenderError as exc:
-            logger.error("[codex-reset][pipeline] 手动渲染失败 reason=%s", exc.reason, exc_info=True)
-            return None, payload
+            reason = exc.reason if exc.reason in _RENDER_ERROR_REASONS else "render_error"
+            logger.error(
+                "[codex-reset][pipeline] 手动渲染失败 reason=%s", reason, exc_info=True
+            )
+            return None, payload, reason
+        except TimeoutError:
+            logger.error("[codex-reset][pipeline] 手动渲染超时")
+            return None, payload, "render_timeout"
         except Exception:  # pragma: no cover - 渲染异常统一按降级处理
             logger.error("[codex-reset][pipeline] 手动渲染异常", exc_info=True)
-            return None, payload
-        return png, payload
+            return None, payload, "render_error"
+        return png, payload, None
 
     async def build_report_data(
         self,

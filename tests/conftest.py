@@ -49,6 +49,15 @@ from services.scheduler import DEFAULT_ROTATION, SourceScheduler  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
+#: 会话内打开过、尚未确定关闭的 Repository 强引用表（改动 4）。
+#:
+#: aiosqlite 的连接由一个后台 `_connection_worker_thread` 服务，若连接对象被 GC，
+#: 其 `__del__` 会在「当时正在运行的某个事件循环」里调用 `call_soon_threadsafe`，
+#: 一旦该循环随后关闭，线程就会抛 `RuntimeError: Event loop is closed`，被 pytest
+#: 报告为 `PytestUnhandledThreadExceptionWarning`。这里用强引用阻止连接在测试中途被
+#: GC，并在会话结束时统一、确定地在事件循环内 `close()`，从根本上消除该警告。
+_OPEN_REPOS: list[Any] = []
+
 
 # ---------------------------------------------------------------------------
 # 通用工具
@@ -108,9 +117,10 @@ def make_logical_event(
 # 仓库夹具
 # ---------------------------------------------------------------------------
 async def open_repo(tmp_path: Path, *, clock: FakeClock | None = None) -> Repository:
-    """创建并打开一个临时仓库。"""
+    """创建并打开一个临时仓库（同时登记到会话级清理表，避免连接被 GC 触发线程警告）。"""
     repo = Repository(tmp_path / "codex-reset.db", clock=clock or FakeClock())
     await repo.open()
+    _OPEN_REPOS.append(repo)
     return repo
 
 
@@ -131,6 +141,25 @@ def repo(tmp_path: Path, clock: FakeClock) -> Iterable[Repository]:
     repository = make_repo(tmp_path, clock=clock)
     yield repository
     run(repository.close())
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_tracked_repos() -> Iterable[None]:
+    """会话结束时统一关闭所有登记过的 Repository（改动 4）。
+
+    放在一个事件循环内顺序 `close()`（幂等），保证 aiosqlite 后台线程在循环关闭前
+    完成 `call_soon_threadsafe`，避免 `PytestUnhandledThreadExceptionWarning`。
+    """
+    yield
+
+    async def _close_all() -> None:
+        for repository in _OPEN_REPOS:
+            try:
+                await repository.close()
+            except Exception:  # 清理阶段绝不阻断其他仓库的关闭
+                pass
+
+    run(_close_all())
 
 
 @pytest.fixture

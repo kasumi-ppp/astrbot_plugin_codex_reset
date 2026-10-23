@@ -139,14 +139,24 @@ FONT_SEARCH_PATTERNS: tuple[str, ...] = (
     "*PingFang*",
 )
 
+#: 包内内置中文字体（随插件分发，不依赖宿主系统字体）。
+BUNDLED_FONT_FILENAME = "NotoSansCJKsc-Regular.otf"
 
-def _resolve_font_path(explicit: str | None = None) -> str | None:
-    """定位一个可用的中文字体文件；找不到返回 None（调用方抛 `ReportRenderError`）。"""
-    if explicit:
-        candidate = Path(explicit)
-        if candidate.is_file():
-            return str(candidate)
-        logger.warning("[codex-reset][report] 指定字体不存在：%s", explicit)
+
+def bundled_font_path() -> str | None:
+    """返回包内内置中文字体的绝对路径；文件不存在时返回 None。
+
+    基于 `Path(__file__)` 定位，保证插件被打包 / 软链 / 任意工作目录下都能找到
+    `resources/fonts/NotoSansCJKsc-Regular.otf`。
+    """
+    candidate = (
+        Path(__file__).resolve().parent.parent / "resources" / "fonts" / BUNDLED_FONT_FILENAME
+    )
+    return str(candidate) if candidate.is_file() else None
+
+
+def _resolve_system_font_path() -> str | None:
+    """仅在系统字体候选 / 搜索目录中定位中文字体（不含内置字体）。"""
     for raw in FONT_CANDIDATES:
         candidate = Path(raw)
         if candidate.is_file():
@@ -163,6 +173,37 @@ def _resolve_font_path(explicit: str | None = None) -> str | None:
             except OSError:  # pragma: no cover - 目录不可读
                 continue
     return None
+
+
+def _resolve_font_path(explicit: str | None = None) -> str | None:
+    """定位一个可用的中文字体文件；找不到返回 None（调用方抛 `ReportRenderError`）。
+
+    优先级：显式 `explicit` 参数 > 包内内置字体 > 系统字体候选 / 搜索目录。
+    """
+    if explicit:
+        candidate = Path(explicit)
+        if candidate.is_file():
+            return str(candidate)
+        logger.warning("[codex-reset][report] 指定字体不存在：%s", explicit)
+    bundled = bundled_font_path()
+    if bundled is not None:
+        return bundled
+    return _resolve_system_font_path()
+
+
+def image_environment_status() -> tuple[bool, str]:
+    """图片环境就绪状态（供 `/cr status` 展示）。
+
+    返回 `(是否就绪, 中文说明)`：
+    - 内置字体存在 → `(True, "就绪（内置中文字体）")`；
+    - 只有系统字体 → `(True, "就绪（系统字体）")`；
+    - 均缺失 → `(False, "未就绪（缺少中文字体）")`。
+    """
+    if bundled_font_path() is not None:
+        return True, "就绪（内置中文字体）"
+    if _resolve_system_font_path() is not None:
+        return True, "就绪（系统字体）"
+    return False, "未就绪（缺少中文字体）"
 
 
 class FontSet:
@@ -506,6 +547,7 @@ def merge_lines(*groups: Sequence[str]) -> list[str]:
 
 
 __all__ = [
+    "BUNDLED_FONT_FILENAME",
     "CANVAS_HEIGHT",
     "CANVAS_WIDTH",
     "CONFIDENCE_CN",
@@ -521,8 +563,10 @@ __all__ = [
     "THEMES",
     "THEME_NAMES",
     "WATCH_STATUS_TEXT",
+    "bundled_font_path",
     "confidence_text",
     "ensure_theme",
+    "image_environment_status",
     "merge_lines",
     "render_report_png",
     "render_report_text_lines",

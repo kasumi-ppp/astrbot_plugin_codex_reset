@@ -846,3 +846,166 @@ def test_readonly_instance_rejects_write_commands_but_allows_queries(tmp_path: P
     assert "只读模式" in subscribe.text
     assert count == 0, "只读实例不得写入订阅"
     assert status.error is None or status.error == "no_data", status.text
+
+
+# ---------------------------------------------------------------------------
+# 改动 2 / 3：图片失败分类提示 + 状态 / 配置双层开关展示
+# ---------------------------------------------------------------------------
+class FakeDaily:
+    """`DailyReportProvider` 替身：返回预置的 `(png, payload, reason)`。"""
+
+    def __init__(self, result: tuple[bytes | None, dict[str, Any] | None, str | None]) -> None:
+        self.result = result
+        self.calls: list[tuple[bool, str | None]] = []
+
+    async def manual_report_png(
+        self, *, now: Any, test: bool = False, theme: str | None = None
+    ) -> tuple[bytes | None, dict[str, Any] | None, str | None]:
+        self.calls.append((test, theme))
+        return self.result
+
+
+def _report_payload() -> dict[str, Any]:
+    return {
+        "business_date": "2026-10-20",
+        "rounded_24h": 37,
+        "rounded_48h": 62,
+        "confidence": "medium",
+        "updated_at": "2026-10-20T01:00:00+00:00",
+        "last_reset_at": None,
+        "watch_status": "none",
+        "watch_window": None,
+        "stale": False,
+        "theme": "dark",
+        "manual": True,
+        "test": False,
+    }
+
+
+async def _make_service_with_daily(tmp_path: Path, daily: FakeDaily) -> tuple[Any, Any]:
+    """构造带 `daily` 替身的命令服务（必须在事件循环内调用）。"""
+    clock = FakeClock(utc(2026, 10, 20, 5, 0))
+    repo = await open_repo(tmp_path, clock=clock)
+    bundle = make_pipeline(repo, clock)
+    service = CommandService(
+        repo=repo,
+        read=bundle.pipeline,
+        settings_provider=lambda: bundle.settings,
+        sink=FakeSink(),
+        clock=clock,
+        tz_provider=lambda: SHANGHAI,
+        daily=daily,
+    )
+    return service, repo
+
+
+def test_report_command_classifies_render_failures(tmp_path: Path) -> None:
+    """改动 2：`/cr report` 按失败类别给出中文提示，且不与「图片发送失败」叠加。"""
+    async def scenario() -> tuple[str, str, str]:
+        cases = {
+            "font_missing": "缺少中文字体，无法生成图片",
+            "font_error": "缺少中文字体，无法生成图片",
+            "render_timeout": "图片渲染超时",
+            "render_error": "图片渲染失败",
+        }
+        out: dict[str, str] = {}
+        for reason, keyword in cases.items():
+            service, repo = await _make_service_with_daily(
+                tmp_path, FakeDaily((None, _report_payload(), reason))
+            )
+            try:
+                reply = await service.handle(_request("report"))
+                out[reason] = reply.text
+                assert reply.error == "render_failed"
+                assert keyword in reply.text, reply.text
+                assert "图片发送失败" not in reply.text, reply.text
+            finally:
+                await repo.close()
+        return out["font_missing"], out["render_timeout"], out["render_error"]
+
+    run(scenario())
+
+
+def test_report_command_no_data_keeps_existing_hint(tmp_path: Path) -> None:
+    """改动 2：payload 为 None 时保持「暂无数据」提示。"""
+    async def scenario() -> None:
+        service, repo = await _make_service_with_daily(tmp_path, FakeDaily((None, None, None)))
+        try:
+            reply = await service.handle(_request("report"))
+            assert reply.error == "no_data"
+            assert REPORT_NO_DATA_TEXT in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_test_image_command_classifies_render_failures(tmp_path: Path) -> None:
+    """改动 2：`/cr test image` 失败分类带「🧪【测试消息】」前缀 + 来源署名，且不含「图片发送失败」。"""
+    async def scenario() -> None:
+        service, repo = await _make_service_with_daily(
+            tmp_path, FakeDaily((None, _report_payload(), "font_missing"))
+        )
+        try:
+            reply = await service.handle(_request("test", args=("image",)))
+            assert reply.error == "render_failed"
+            assert "🧪【测试消息】" in reply.text
+            assert "缺少中文字体" in reply.text
+            assert "数据来源：https://codex-reset.com/" in reply.text
+            assert "图片发送失败" not in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_status_shows_image_environment_and_daily_switch(tmp_path: Path) -> None:
+    """改动 3：`/cr status` 展示图片环境与每日预测图片双层开关。"""
+    async def scenario() -> None:
+        clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            reply = await service.handle(_request("status"))
+            assert "图片环境：" in reply.text
+            assert "每日预测图片：全局" in reply.text
+            assert "本群" in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
+def test_settings_shows_two_layer_daily_switch(tmp_path: Path) -> None:
+    """改动 3：`/cr settings` 明确展示全局 + 本群 + 来源。"""
+    async def scenario() -> None:
+        from services.models import GroupSettings, PluginSettings
+
+        clock = FakeClock(utc(2026, 10, 20, 5, 0))
+        repo = await open_repo(tmp_path, clock=clock)
+        # 全局开启 daily + 群默认开启 → 全局开 / 本群开（继承全局）
+        settings = PluginSettings(
+            enable_daily_report=True, defaults=GroupSettings(enable_daily_report=True)
+        )
+        bundle = make_pipeline(repo, clock, settings=settings)
+        service = CommandService(
+            repo=repo,
+            read=bundle.pipeline,
+            settings_provider=lambda: bundle.settings,
+            sink=FakeSink(),
+            clock=clock,
+            tz_provider=lambda: SHANGHAI,
+        )
+        try:
+            await service.handle(_request("subscribe"))
+            settings_reply = await service.handle(_request("settings"))
+            assert "每日预测图片：全局 开启 ｜ 本群 开启（全局默认）" in settings_reply.text
+
+            # 本群关闭 daily → 全局开 / 本群关（群覆盖）
+            clock.advance(6)
+            await service.handle(_request("set", ("daily", "off")))
+            clock.advance(6)
+            settings_reply = await service.handle(_request("settings"))
+            assert "每日预测图片：全局 开启 ｜ 本群 关闭（群覆盖）" in settings_reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
