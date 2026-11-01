@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import logging
 import random
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -18,8 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .clock import Clock, ensure_utc
 from .config import parse_hhmm
 from .errors import ErrorCode
-
-logger = logging.getLogger(__name__)
+from .log import logger
 
 DEFAULT_ROTATION: tuple[str, ...] = ("forecast", "timeline", "forecast", "feed")
 BACKOFF_SCHEDULE: tuple[int, ...] = (120, 240, 480, 900)

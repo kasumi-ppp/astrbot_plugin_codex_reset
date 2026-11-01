@@ -8,13 +8,13 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
 from .errors import ErrorCode
+from .log import logger
 from .models import (
     AlertWindow,
     BankedObservation,
@@ -25,8 +25,6 @@ from .models import (
     TimelineEvent,
     TimelineSnapshot,
 )
-
-logger = logging.getLogger(__name__)
 
 GROUP_KINDS: frozenset[str] = frozenset({"reset", "credits", "boost", "unlock"})
 ANNOUNCEMENT_STATES: frozenset[str] = frozenset({"announced", "none"})

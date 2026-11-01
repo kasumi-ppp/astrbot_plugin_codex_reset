@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from io import BytesIO
@@ -24,8 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .clock import ensure_utc
 from .errors import SITE_URL
-
-logger = logging.getLogger(__name__)
+from .log import logger
 
 CANVAS_WIDTH = 900
 CANVAS_HEIGHT = 1200

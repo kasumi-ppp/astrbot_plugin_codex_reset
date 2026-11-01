@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import logging
 import math
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -18,10 +17,9 @@ import aiohttp
 
 from .clock import Clock
 from .errors import SITE_BASE_URL, USER_AGENT, ErrorCode
+from .log import logger
 from .models import FetchResult
 from .parser import parse_iso
-
-logger = logging.getLogger(__name__)
 
 ENDPOINTS: tuple[str, ...] = ("forecast", "timeline", "feed")
 DEFAULT_BASE_URL = SITE_BASE_URL

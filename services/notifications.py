@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -24,6 +23,7 @@ from zoneinfo import ZoneInfo
 from .clock import Clock, ensure_utc
 from .config import resolve_group_settings, timezone_cn_name
 from .errors import SITE_URL, ErrorCode
+from .log import logger
 from .models import (
     DeliveryTask,
     ForecastDecision,
@@ -36,8 +36,6 @@ from .parser import safe_url
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查期需要，避免运行期同层循环导入
     from .repository import Repository
-
-logger = logging.getLogger(__name__)
 
 SOURCE_LINE = f"数据来源：{SITE_URL}"
 """署名行（AC-20）：`notifications.py` 唯一定义，其他模块只允许引用。"""

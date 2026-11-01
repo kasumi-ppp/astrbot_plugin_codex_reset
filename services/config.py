@@ -12,13 +12,11 @@ WebUI 卡片写回规则（`override_from_card`）：卡片值等于全局默认
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .log import logger
 from .models import GroupOverride, GroupSettings, PluginSettings
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_TIME_ZONE = "Asia/Shanghai"
 DEFAULT_SPACING_SECONDS = 60

@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [v1.5.0] - 2026-11-01
+
+### 安全与兼容
+
+- `services/` 不再直接使用 Python 内置 `logging`；新增统一日志代理，由 `main.py` 注入
+  `astrbot.api.logger`，保持服务层可脱离 AstrBot 测试。
+- 新增服务层日志依赖静态门禁，并完成 v1.5.0 版本标识升级。
+
 ## [v1.4.0] - 2026-10-23
 
 ### 修复与改进
@@ -133,7 +141,8 @@
 - 只读判定是**一次性**的：若持锁实例在只读实例启动后才崩溃，只读实例不会自愈，需要再重启一次（不会产生两个写者）。
 - 仅支持 `aiocqhttp` 平台的 `@全体成员`，其他平台静默省略。
 
-[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.5.0...HEAD
+[v1.5.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.4.0...v1.5.0
 [v1.4.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.3.0...v1.4.0
 [v1.3.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.2.0...v1.3.0
 [v1.2.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/releases/tag/v1.2.0

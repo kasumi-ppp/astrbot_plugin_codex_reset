@@ -166,7 +166,7 @@ def test_metadata_yaml_is_parseable_and_correct() -> None:
     metadata = _parse_metadata((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_codex_reset"
     assert metadata["display_name"] == "Codex 重置雷达"
-    assert metadata["version"] == "v1.4.0"
+    assert metadata["version"] == "v1.5.0"
     assert metadata["author"] == "kasumi-ppp"
     assert metadata["repo"] == "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
     assert metadata["astrbot_version"] == ">=4.16,<5"
@@ -182,7 +182,9 @@ def test_main_py_compiles_and_declares_plugin() -> None:
     compile(source, "main.py", "exec")  # 语法错误会直接抛
     assert '@register(\n    PLUGIN_NAME,' in source or '@register(PLUGIN_NAME' in source
     assert 'PLUGIN_NAME = "astrbot_plugin_codex_reset"' in source
-    assert 'PLUGIN_VERSION = "1.4.0"' in source
+    assert 'PLUGIN_VERSION = "1.5.0"' in source
+    assert "from .services.log import set_logger as set_service_logger" in source
+    assert "set_service_logger(logger)" in source
     # 单指令 + GreedyStr 手工分派（不用 command_group）
     assert '@filter.command("cr", alias={"codexreset"})' in source
     assert "GreedyStr" in source
@@ -261,6 +263,38 @@ def test_services_layer_never_imports_astrbot() -> None:
             if stripped.startswith(("import astrbot", "from astrbot")):
                 offenders.append(f"{path.name}: {stripped}")
     assert offenders == []
+
+
+def test_services_layer_never_imports_builtin_logging() -> None:
+    service_files = {
+        "client.py",
+        "commands.py",
+        "config.py",
+        "notifications.py",
+        "parser.py",
+        "pipeline.py",
+        "report_renderer.py",
+        "repository.py",
+        "scheduler.py",
+    }
+    for path in sorted((ROOT / "services").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports_logging = any(
+            (
+                isinstance(node, ast.Import)
+                and any(alias.name.split(".")[0] == "logging" for alias in node.names)
+            )
+            or (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").split(".")[0] == "logging"
+            )
+            for node in ast.walk(tree)
+        )
+        assert not imports_logging, f"{path.name} 不得直接导入 built-in logging"
+
+    for filename in service_files:
+        source = (ROOT / "services" / filename).read_text(encoding="utf-8")
+        assert "from .log import logger" in source, filename
 
 
 def test_requirements_cover_runtime_dependencies() -> None:

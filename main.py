@@ -42,6 +42,7 @@ if __package__:
         parse_timezone,
     )
     from .services.errors import SchemaTooNewError
+    from .services.log import set_logger as set_service_logger
     from .services.models import CommandRequest, PluginSettings, SubscriptionRow
     from .services.notifications import DeliveryWorker
     from .services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
@@ -59,11 +60,14 @@ else:  # 独立测试入口；AstrBot 按包加载时必须使用上面的相对
         parse_timezone,
     )
     from services.errors import SchemaTooNewError
+    from services.log import set_logger as set_service_logger
     from services.models import CommandRequest, PluginSettings, SubscriptionRow
     from services.notifications import DeliveryWorker
     from services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
     from services.repository import Repository
     from services.scheduler import SourceScheduler
+
+set_service_logger(logger)
 
 try:  # AstrBot ≥ 4.5 提供数据目录工具；旧版本回落到工作目录
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -86,7 +90,7 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_VERSION = "1.5.0"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
 PLUGIN_DESC = "读取 codex-reset.com 公开数据，向订阅群推送重置确认、预告、概率与权益动态"

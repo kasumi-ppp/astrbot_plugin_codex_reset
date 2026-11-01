@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import logging
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -21,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from .clock import Clock, ensure_utc
 from .config import OVERRIDE_FIELDS, resolve_group_settings
+from .log import logger
 from .models import (
     CommandReply,
     CommandRequest,
@@ -42,8 +42,6 @@ from .notifications import (
     render_daily_report_text,
     render_test,
 )
-
-logger = logging.getLogger(__name__)
 
 #: `(umo, 子命令)` 维度的限频秒数（PRD §4 冻结）
 RATE_LIMITS: dict[str, int] = {

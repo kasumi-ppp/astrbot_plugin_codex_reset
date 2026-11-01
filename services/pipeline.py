@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -28,6 +27,7 @@ from .client import ENDPOINTS, SourceClient
 from .clock import Clock, ensure_utc
 from .config import resolve_group_settings
 from .errors import ErrorCode
+from .log import logger
 from .models import (
     Baseline,
     FeedSnapshot,
@@ -56,8 +56,6 @@ from .parser import parse_feed, parse_forecast, parse_timeline
 from .report_renderer import ReportRenderError, ensure_theme, render_report_png
 from .repository import Repository
 from .scheduler import DailyReportScheduler, SourceScheduler
-
-logger = logging.getLogger(__name__)
 
 SettingsProvider = Callable[[], PluginSettings]
 TimezoneProvider = Callable[[], Any]

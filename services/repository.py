@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -23,6 +22,7 @@ import aiosqlite
 from .clock import Clock, ensure_utc
 from .config import override_to_json, parse_override_json
 from .errors import ErrorCode, PluginError, SchemaTooNewError
+from .log import logger
 from .models import (
     Baseline,
     DailyReportRow,
@@ -35,8 +35,6 @@ from .models import (
     SubscriptionRow,
 )
 from .notifications import event_priority_for
-
-logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 
