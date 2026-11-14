@@ -46,6 +46,8 @@ if __package__:
     from .services.models import CommandRequest, PluginSettings, SubscriptionRow
     from .services.notifications import DeliveryWorker
     from .services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
+    from .services.public_monitor import PublicMonitor
+    from .services.public_sources import PublicSourceClient
     from .services.repository import Repository
     from .services.scheduler import SourceScheduler
 else:  # 独立测试入口；AstrBot 按包加载时必须使用上面的相对导入。
@@ -64,6 +66,8 @@ else:  # 独立测试入口；AstrBot 按包加载时必须使用上面的相对
     from services.models import CommandRequest, PluginSettings, SubscriptionRow
     from services.notifications import DeliveryWorker
     from services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
+    from services.public_monitor import PublicMonitor
+    from services.public_sources import PublicSourceClient
     from services.repository import Repository
     from services.scheduler import SourceScheduler
 
@@ -90,10 +94,10 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.5.0"
+PLUGIN_VERSION = "1.6.0"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
-PLUGIN_DESC = "读取 codex-reset.com 公开数据，向订阅群推送重置确认、预告、概率与权益动态"
+PLUGIN_DESC = "向订阅群推送 Codex、Claude、Grok 和 Antigravity Gemini 公开额度事件"
 
 DB_FILENAME = "codex_reset.db"
 AUDIT_DIRNAME = "audit"
@@ -376,6 +380,7 @@ class CodexResetRadar(Star):
             tz_provider=self.current_timezone,
             readonly_provider=lambda: self._readonly,
             daily=self._pipeline,
+            test_send=self._send,
         )
 
         if not self._readonly:
@@ -401,6 +406,10 @@ class CodexResetRadar(Star):
             # 只读实例（schema 过新 / 另一实例持锁）不投递：投递也是写路径
             logger.warning("[codex-reset][main] 只读模式：不启动投递任务")
         else:
+            public_monitor = PublicMonitor(repo, PublicSourceClient(), self.clock, self.current_settings)
+            self._tasks.append(
+                asyncio.create_task(public_monitor.run(), name="codex-reset-public")
+            )
             self._tasks.append(
                 asyncio.create_task(self._delivery_loop(), name="codex-reset-delivery")
             )
@@ -1083,6 +1092,8 @@ class CodexResetRadar(Star):
         rows = await self._repo.list_subscriptions()
         cards: list[dict[str, Any]] = []
         for row in rows:
+            if not row.enabled:
+                continue
             card = override_to_card(
                 row.override,
                 self._plugin_settings,

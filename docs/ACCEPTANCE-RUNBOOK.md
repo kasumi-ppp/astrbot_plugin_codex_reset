@@ -1,4 +1,4 @@
-# 验收执行单（Runbook）· Codex 重置雷达 V1.2
+# 验收执行单（Runbook）· Codex 重置雷达 V1.6.0
 
 > `docs/ACCEPTANCE.md` 是**覆盖矩阵**（有没有覆盖）；本文是**执行手册**（今天怎么敲、看到什么算过）。
 > 二者不重复：本文不重抄 AC-01~24 场景，只给可粘贴命令、**逐字**期望文案与判定口径。
@@ -406,6 +406,118 @@ E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵�
 
 **本文不覆盖**：多群并发（AC-13）仅建议抽查两群；>7 天长期 WAL/内存增长与审计跨月切分归长稳；
 上游字段变更（AC-23）不可主动构造，不建议为验收伪造站点响应。
+
+## 10. v1.6.0 多产品采集验收
+
+本节验收 Claude、Grok Bot、Grok Build、Antigravity Gemini。四个新增全局开关
+`enable_claude`、`enable_grok_bot`、`enable_grok_build`、`enable_antigravity_gemini` 均默认 `false`；
+先确认关闭时无对应产品请求，再只启用待验产品。裸 `/cr subscribe` 和 `/cr test` 仍用于 Codex，裸
+`/cr unsubscribe` 取消该群全部产品。产品参数为 `claude`、`grok-bot`、`grok-build`、`antigravity-gemini`。
+
+### 10.1 容器数据源探针（只读）
+
+在 ECS Linux 终端运行。先检查容器与持久卷，再从容器直接发起与插件一致的 HTTP 请求：
+
+```bash
+docker inspect --format '{{.State.Status}} mounts={{len .Mounts}}' astrbot
+docker exec -i astrbot python3 - <<'PY'
+import asyncio
+import aiohttp
+
+endpoints = {
+    "claude": "https://claudereset.org/api/v1/timeline.json",
+    "grok": "https://quotaresets.com/api/v1/events.json",
+    "agy-resets": "https://www.agyresets.com/api/v1/resets",
+    "agy-status": "https://www.agyresets.com/api/v1/status",
+}
+headers = {
+    "User-Agent": "AstrBot Codex Reset Radar/1.6.0 "
+                  "(+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)",
+    "Accept": "application/json",
+    "Accept-Encoding": "identity",
+}
+
+async def probe(client, name, url):
+    try:
+        async with client.get(url, allow_redirects=False) as response:
+            print(name, response.status, response.content_type,
+                  "retry-after", response.headers.get("Retry-After", "-"),
+                  "content-encoding", response.headers.get("Content-Encoding", "-"))
+            if response.status == 200 and response.content_type == "application/json":
+                body = await response.json()
+                print(name, "json keys", list(body) if isinstance(body, dict) else type(body).__name__)
+    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+        print(name, type(exc).__name__)
+
+async def main():
+    timeout = aiohttp.ClientTimeout(total=12, connect=4, sock_read=6)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as client:
+        await asyncio.gather(*(probe(client, name, url) for name, url in endpoints.items()))
+
+asyncio.run(main())
+PY
+```
+
+403 表示上游拒绝当前请求。对比本机、ECS 宿主机和容器使用同一套头部时的结果，核对 DNS、TLS、
+实际代理与上游访问要求。日志中的 403 分别退避 15、30、60 分钟，之后维持 60 分钟，尊重更长的
+`Retry-After`。确认该源失败后其他源仍采集，且之前的基线与成功时间仍可查询。持续 403 的产品保持关闭。
+只记录诊断所需字段与脱敏错误摘要。
+
+### 10.2 SQLite 一致性备份（在线，SQLite Backup API）
+
+在 AstrBot 容器内使用 SQLite Backup API 复制数据库；不要直接复制正在写入的 `.db` 文件，也不要只复制主库而遗漏 WAL：
+
+```bash
+docker exec -i astrbot python3 - <<'PY'
+import sqlite3
+from pathlib import Path
+src = Path('/AstrBot/data/plugin_data/astrbot_plugin_codex_reset/codex_reset.db')
+dst = src.with_name('codex_reset.pre-v1.6.0.backup.db')
+with sqlite3.connect(f'file:{src}?mode=ro', uri=True) as source, sqlite3.connect(dst) as backup:
+    source.backup(backup)
+    result = backup.execute('PRAGMA integrity_check').fetchone()[0]
+print(f'backup={dst.name} integrity_check={result}')
+PY
+```
+
+期望 `integrity_check=ok`。记录备份文件名、大小、时间和该输出；确认插件容器数据卷有足够空间。此备份含订阅与状态数据，按生产数据库同等权限保管，不要上传到工单或聊天。
+
+### 10.3 产品基线与真实来源判定
+
+1. 在 WebUI 记录四个新增开关为 `false`，保存后等待至少一个采集轮询周期；以容器日志/受控出站代理计数确认没有这四类来源请求。只看 `/cr status` 里“关闭”不足以证明没有请求。
+2. 为一个隔离验收群依次执行 `/cr subscribe claude`、`/cr subscribe grok-bot`、`/cr subscribe grok-build`、`/cr subscribe antigravity-gemini`。再用 `/cr status` 确认订阅及各产品的开关/最近采集状态。以上仅证明本地订阅配置。首次采集前后核对基线待建立 → 就绪，以及采集日志 `baseline=True` 且 `deliveries=0`。
+3. 每次只打开一个全局开关，等待该产品自己的采集周期，记录请求时间、HTTP 状态（或传输错误）、解析后的产品/事件类型/时间戳及响应诊断。响应诊断只记 HTTP 状态、脱敏后的 JSON 字段名、类型、记录数和解析结果；不得保存或展示认证信息、个人标识、完整原始响应或可能含敏感信息的 URL。
+4. Claude：确认实际采集到 `timeline` 来源响应，并记录其可识别事件类型/时间字段与解析结果；不能用手工构造 timeline 样例冒充真实来源。
+5. Grok Bot、Grok Build：分别记录 `quotaresets` 来源是否响应及各自解析到的产品、事件类型和重置时间。两产品分开开关、分开订阅和分开记证据；一个端点返回成功不能替另一个产品判 PASS。
+6. Antigravity Gemini：记录 `resets` 与 `status` 两类来源各自的响应/失败诊断、解析结果和采集时间；仅有其中一个来源成功时只记部分结果。
+7. 用 `/cr test PRODUCT` 验证群消息格式和产品标记，再等待自然产生的真实事件进行端到端核验：来源响应 → 解析事件 → SQLite 事件/投递记录 → QQ 群收到对应产品消息。测试命令发送的是样例消息，不入库、不建投递，不能作为真实来源或真实事件验收证据。
+8. 对每个产品将结果分别标为 `真实来源已验证`、`部分来源已验证`、`仅模拟/样例`、`未验证` 或 `失败`。只有观察到真实来源数据解析以及真实 QQ 收件，才可标记端到端 PASS；没有自然事件则记 `N/A（无事件）`，不得伪造事件或把样例升级为 PASS。
+
+### 10.4 按产品命令与回滚
+
+管理员在真实群内执行并留存回显：
+
+```text
+/cr subscribe claude
+/cr status
+/cr test claude
+/cr unsubscribe claude
+```
+
+对 `grok-bot`、`grok-build`、`antigravity-gemini` 重复上述序列；确认 `/cr test PRODUCT` 显示测试/样例标记，而订阅状态在退订后只移除对应产品。另单独核对不带产品名的 `/cr subscribe` 与 `/cr test` 仍保持 Codex 旧语义。
+
+回滚时先在 WebUI 将对应新增 `enable_*` 开关关闭并保存，逐个执行 `/cr unsubscribe PRODUCT`，检查 `/cr status` 不再显示该群订阅该产品；确认产品请求停止。不要删除数据库或清空事件表。若版本回退，先停止 AstrBot，再用本节 10.2 创建的 SQLite Backup API 副本按部署流程恢复；恢复前将当前库另行备份，并记录回滚前后文件校验信息。回退后核对原 Codex 订阅、事件与日报状态，再启动服务并观察日志。
+
+### 10.5 验收记录
+
+| 产品 | 全局开关关闭无请求 | 来源探针/真实响应诊断 | 解析事件证据 | `/cr test PRODUCT` | 真实 QQ 事件 | 结论/证据路径 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude | | `timeline` | | | | |
+| Grok Bot | | `quotaresets` | | | | |
+| Grok Build | | `quotaresets` | | | | |
+| Antigravity Gemini | | `resets` + `status` | | | | |
+
+在记录中明确标注“样例/模拟”或“真实来源/真实 QQ”。日志、截图和数据库备份不得包含凭据；保存的诊断应脱敏。
 
 ## 11. 群内粘贴序列（纯聊天，可直接复制）
 

@@ -399,7 +399,7 @@ class Pipeline:
         )
         queued = 0
         for sub in await self._repo.list_subscriptions():
-            if not sub.enabled:
+            if not sub.enabled or "codex" not in sub.products:
                 continue
             settings = resolve_group_settings(plugin, sub.override)
             if not settings.enable_forecast:
@@ -569,7 +569,7 @@ class Pipeline:
         plugin = self._settings_provider()
         created = 0
         for sub in await self._repo.list_subscriptions():
-            if not sub.enabled:
+            if not sub.enabled or "codex" not in sub.products:
                 continue
             settings = resolve_group_settings(plugin, sub.override)
             for event in events:
@@ -590,9 +590,9 @@ class Pipeline:
     @staticmethod
     def _predates_subscription(event: LogicalEvent, sub: SubscriptionRow) -> bool:
         """首次订阅不追送历史：`occurred_at < subscribed_at` 一律跳过。"""
-        if sub.subscribed_at is None:
+        if (since := sub.subscribed_since("codex")) is None:
             return False
-        return ensure_utc(event.occurred_at) < ensure_utc(sub.subscribed_at)
+        return ensure_utc(event.occurred_at) < ensure_utc(since)
 
     @staticmethod
     def _category_enabled(kind: str, settings: GroupSettings) -> bool:
@@ -810,7 +810,7 @@ class Pipeline:
 
         queued = 0
         for sub in await self._repo.list_subscriptions():
-            if not sub.enabled:
+            if not sub.enabled or "codex" not in sub.products:
                 continue
             settings = resolve_group_settings(plugin, sub.override)
             eligible: list[LogicalEvent] = []
@@ -897,7 +897,7 @@ class Pipeline:
             return 0
         sent = 0
         for sub in await self._repo.list_subscriptions():
-            if not sub.enabled:
+            if not sub.enabled or "codex" not in sub.products:
                 continue
             settings = resolve_group_settings(plugin, sub.override)
             if not settings.enable_daily_report:

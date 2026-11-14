@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from .models import (
     GroupSettings,
     PluginSettings,
     ReadModel,
+    SendFn,
     SubscriptionRow,
     TimelineEvent,
 )
@@ -42,6 +44,7 @@ from .notifications import (
     render_daily_report_text,
     render_test,
 )
+from .public_messages import PRODUCT_LABELS, PUBLIC_STATE_LABELS, product_enabled, render_public
 
 #: `(umo, 子命令)` 维度的限频秒数（PRD §4 冻结）
 RATE_LIMITS: dict[str, int] = {
@@ -153,8 +156,10 @@ HELP_TEXT = "\n".join(
         "/cr help          本说明",
         "",
         "管理（AstrBot 管理员）：",
-        "/cr subscribe     订阅当前群",
-        "/cr unsubscribe   取消订阅当前群",
+        "/cr subscribe [产品]  订阅该产品（省略时订阅 Codex）",
+        "/cr unsubscribe [产品]  退订该产品（省略时整群退订）",
+        "产品：codex、claude、grok-bot、grok-build、antigravity-gemini",
+        "/cr test <产品>  发送测试消息",
         "/cr settings      查看本群生效配置与来源",
         "/cr set <项> <值> 修改本群配置（reset/watch/forecast/credits/daily on|off；p24/p48 0-100）",
         "/cr report        手动生成当前概率预测图片（不影响每日自动日报）",
@@ -226,6 +231,7 @@ class CommandService:
         tz_provider: Callable[[], ZoneInfo],
         readonly_provider: Callable[[], bool] | None = None,
         daily: DailyReportProvider | None = None,
+        test_send: SendFn | None = None,
     ) -> None:
         """依赖注入；`repo` 只需提供本文件用到的仓储方法（便于测试替身）。
 
@@ -242,6 +248,7 @@ class CommandService:
         self._tz_provider = tz_provider
         self._readonly = readonly_provider or (lambda: False)
         self._daily = daily
+        self._test_send = test_send
         self._last_seen: dict[tuple[str, str], float] = {}
 
     # ------------------------------------------------------------------
@@ -357,7 +364,30 @@ class CommandService:
                 "信息流：" + ("⚠️ 站点标记为陈旧" if feed.stale else "正常")
                 + f"，最近采集 {format_time(feed.fetched_at, tz)}"
             )
-        lines.append(f"订阅群数：{len(subs)}")
+        lines.append(f"订阅群数：{sum(sub.enabled for sub in subs)}")
+        if req.is_group:
+            current = next((sub for sub in subs if sub.umo == req.umo and sub.enabled), None)
+            chosen = "、".join(PRODUCT_LABELS.get(p, p) for p in current.products) if current else "无"
+            lines.append(f"本群订阅：{chosen}")
+        for product, label in PRODUCT_LABELS.items():
+            if product == "codex":
+                continue
+            data = await self._repo.public_product_status(product)
+            state = "开启" if product_enabled(plugin, product) else "关闭"
+            baseline = "就绪" if data["baseline"] else "待建立"
+            refreshed = format_time(data["success"], tz) if data["success"] else "暂无"
+            error = data["error"]
+            error_label = "上游拒绝访问（HTTP 403）" if error == "http_403" else error or "无"
+            latest_event = data["latest"]
+            newest = (
+                f"{format_time(latest_event.occurred_at, tz)} "
+                + PUBLIC_STATE_LABELS[latest_event.state_version]
+                if latest_event else "暂无"
+            )
+            lines.append(
+                f"{label}：{state}｜基线{baseline}｜采集 {refreshed}｜事件 {newest}｜错误 {error_label}"
+            )
+
         lines.append(self._image_environment_line())
         lines.append(await self._daily_report_switch_line(plugin, req))
         lines.append(await self._last_reset_line(tz))
@@ -608,35 +638,52 @@ class CommandService:
     ) -> str:
         if not req.is_group or not req.group_id:
             return GROUP_ONLY_TEXT
-        existing = await self._repo.get_subscription(req.umo)
-        if existing is not None:
-            settings = resolve_group_settings(plugin, existing.override)
-            return "本群已订阅：\n" + self._describe_settings(settings)
-        subscriptions = await self._repo.list_subscriptions()
-        if len(subscriptions) >= max(1, int(plugin.group_limit)):
-            return f"订阅失败：已达群上限 {int(plugin.group_limit)} 个，请先取消其他群订阅。"
-        row = await self._repo.upsert_subscription(
-            umo=req.umo,
-            platform=req.platform,
-            group_id=req.group_id,
-            group_name=req.group_name or f"群 {req.group_id}",
-            override=GroupOverride(),
+        if not req.args and req.platform == "aiocqhttp":
+            existing = await self._repo.get_subscription(req.umo)
+            if existing and "codex" in existing.products:
+                settings = resolve_group_settings(plugin, existing.override)
+                return "本群已订阅：\n" + self._describe_settings(settings)
+        return await self._change_product(req, plugin, subscribe=True)
+
+    async def _change_product(
+        self, req: CommandRequest, plugin: PluginSettings, *, subscribe: bool,
+    ) -> str:
+        product = req.args[0].lower() if req.args else "codex"
+        if len(req.args) > 1 or product not in PRODUCT_LABELS:
+            return "产品参数无效。可用： " + "、".join(PRODUCT_LABELS)
+        if not req.is_group or not req.group_id or req.platform != "aiocqhttp":
+            return "请在目标 QQ 群执行订阅或退订命令。"
+        result, row = await self._repo.change_product_subscription(
+            umo=req.umo, platform=req.platform, group_id=req.group_id,
+            group_name=req.group_name or f"群 {req.group_id}", product=product,
+            subscribe=subscribe, group_limit=plugin.group_limit,
         )
-        synced = await self._sync_sink(row)
-        settings = resolve_group_settings(plugin, row.override)
-        lines = ["✅ 订阅成功：本群将接收 Codex 重置相关推送。", "", self._describe_settings(settings)]
+        if result == "limit":
+            return f"订阅失败：已达群上限 {plugin.group_limit} 个，请先取消其他群订阅。"
+        if result == "missing" or not subscribe and result == "unchanged":
+            return NOT_SUBSCRIBED_TEXT
+        if result == "unchanged":
+            return f"本群已订阅 {PRODUCT_LABELS[product]}。"
+        assert row is not None
+        synced = await self._sync_sink(row) if row.enabled else await self._drop_sink(row.subscription_id)
+        action_name = "subscribe" if subscribe else "unsubscribe"
+        await self._audit(req, f"{action_name}:{product}" if req.args else action_name, "ok")
+        if subscribe and product == "codex":
+            action = "✅ 订阅成功：本群将接收 Codex 重置相关推送。\n\n"
+            action += self._describe_settings(resolve_group_settings(plugin, row.override))
+        else:
+            action = f"✅ {'订阅成功' if subscribe else '已取消订阅'}：{PRODUCT_LABELS[product]}。"
         if not synced:
-            lines.append("")
-            lines.append("提示：WebUI 配置卡片同步失败，配置已在数据库生效。")
-        await self._audit(req, "subscribe", "ok")
-        return "\n".join(lines)
+            action += "\n提示：WebUI 配置卡片同步失败，配置已在数据库生效。"
+        return action
 
     async def _unsubscribe(self, req: CommandRequest) -> str:
+        if not req.is_group or not req.group_id:
+            return GROUP_ONLY_TEXT
+        if req.args:
+            return await self._change_product(req, self._settings_provider(), subscribe=False)
         existing = await self._repo.get_subscription(req.umo)
-        if existing is None:
-            return NOT_SUBSCRIBED_TEXT
-        deleted = await self._repo.delete_subscription(req.umo)
-        if not deleted:
+        if existing is None or not await self._repo.delete_subscription(req.umo):
             return NOT_SUBSCRIBED_TEXT
         await self._drop_sink(existing.subscription_id)
         await self._audit(req, "unsubscribe", "ok")
@@ -795,6 +842,26 @@ class CommandService:
         测试消息**不入库、不建立投递**，也不影响真实事件与日报的去重状态。
         """
         args = [arg.strip().lower() for arg in req.args if arg.strip()]
+        if len(args) == 1 and args[0] in PRODUCT_LABELS:
+            if not req.is_group or not req.group_id or req.platform != "aiocqhttp":
+                return CommandReply(text="请在目标 QQ 群执行产品测试。", error="not_group")
+            product = args[0]
+            text = render_test(tz=tz, settings=plugin) if product == "codex" else render_public(
+                {"product": product, "state": "reset", "occurred_at": self._clock.utcnow().isoformat(),
+                 "scope": "当前测试群", "summary": "模拟额度事件，仅用于验证发送通道。"},
+                test=True,
+            )
+            try:
+                accepted = self._test_send is not None and await asyncio.wait_for(
+                    self._test_send(req.umo, text or "", False), timeout=15,
+                )
+            except TimeoutError:
+                await self._audit(req, f"test:{product}", "uncertain")
+                return CommandReply(text="测试发送超时，结果未知，请检查群消息。", error="send_timeout")
+            await self._audit(req, f"test:{product}", "ok" if accepted else "send_failed")
+            return CommandReply(text="", silent=True) if accepted else CommandReply(
+                text="测试发送失败，请查看 OneBot 连接和插件日志。", error="send_failed",
+            )
         if args and args[0] not in {"image", "img", "图片"}:
             return CommandReply(text=self._finalize(TEST_USAGE), error="bad_args")
         if not args:

@@ -33,6 +33,7 @@ from .models import (
     SendFn,
 )
 from .parser import safe_url
+from .public_messages import product_enabled, render_public
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查期需要，避免运行期同层循环导入
     from .repository import Repository
@@ -636,6 +637,23 @@ class DeliveryWorker:
             return False
 
         plugin = self._settings_provider()
+        if task.kind == "public_event":
+            product = str(task.payload.get("product", ""))
+            if product not in sub.products or not product_enabled(plugin, product):
+                await self._repo.mark_skipped(task, now=now, reason="product_disabled")
+                return False
+            since = sub.subscribed_since(product)
+            if since is not None and task.created_at is not None and task.created_at < since:
+                await self._repo.mark_skipped(task, now=now, reason="product_unsubscribed")
+                return False
+            if task.state_version != "retracted" and await self._repo.get_logical_event(
+                task.logical_id, "retracted"
+            ):
+                await self._repo.mark_skipped(task, now=now, reason="upstream_retracted")
+                return False
+        elif "codex" not in sub.products:
+            await self._repo.mark_skipped(task, now=now, reason="product_disabled")
+            return False
         settings = resolve_group_settings(plugin, sub.override)
         if not self._category_enabled(task.kind, settings):
             await self._repo.mark_skipped(task, now=now, reason="category_disabled")
@@ -733,6 +751,8 @@ class DeliveryWorker:
         更正事件复用原事件的 `kind`（类别门控才能「跟随原类别」），靠 payload 里的
         `reason` 区分，因此必须在 kind 分派**之前**判断。
         """
+        if task.kind == "public_event":
+            return render_public(task.payload)
         if is_correction(task.payload):
             return render_correction(task.payload, tz=tz, settings=settings)
         if task.kind == "reset":

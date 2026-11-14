@@ -4,6 +4,26 @@
     "type": "bool",
     "default": true
   },
+  "enable_claude": {
+    "description": "启用 Claude / Claude Code 公开额度事件监控",
+    "type": "bool",
+    "default": false
+  },
+  "enable_grok_bot": {
+    "description": "启用 Grok Bot 公开额度事件监控",
+    "type": "bool",
+    "default": false
+  },
+  "enable_grok_build": {
+    "description": "启用 Grok Build 公开额度事件监控",
+    "type": "bool",
+    "default": false
+  },
+  "enable_antigravity_gemini": {
+    "description": "启用 Antigravity Gemini 公开额度事件监控",
+    "type": "bool",
+    "default": false
+  },
   "enable_confirmed_reset": {
     "description": "推送「全球重置已确认」通知",
     "type": "bool",

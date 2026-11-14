@@ -1,8 +1,8 @@
 name: astrbot_plugin_codex_reset
 display_name: Codex 重置雷达
-desc: 读取 codex-reset.com 公开数据，向订阅的 QQ 群推送 Codex 全球重置确认、提前预警、重置概率与额外重置权益动态；全部消息带数据来源署名。
-short_desc: Codex 全球重置确认 / 预警 / 概率 / 权益推送
-version: v1.5.0
+desc: 监控 Codex、Claude、Grok Bot、Grok Build 和 Antigravity Gemini 的公开额度事件，按产品向订阅的 QQ 群推送并附来源。
+short_desc: Codex / Claude / Grok / Antigravity Gemini 额度事件推送
+version: v1.6.0
 author: kasumi-ppp
 repo: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset
 astrbot_version: ">=4.16,<5"

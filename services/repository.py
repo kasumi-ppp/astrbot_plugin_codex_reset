@@ -607,10 +607,15 @@ class Repository:
     async def update_subscription_override(self, umo: str, override: GroupOverride) -> bool:
         """更新某群的**稀疏**覆盖（`/cr set` 与 WebUI 卡片的唯一写入口）。"""
         async with self._tx() as conn:
+            async with conn.execute("SELECT settings_json FROM subscriptions WHERE umo=?", (umo,)) as result:
+                raw = await result.fetchone()
+            previous = self._subscription_json(raw["settings_json"]) if raw is not None else {}
+            merged = self._subscription_json(override_to_json(override))
+            merged.update({key: previous[key] for key in ("products", "product_since") if key in previous})
             cursor = await conn.execute(
                 "UPDATE subscriptions SET settings_json=?, updated_at=?, version=version + 1"
                 " WHERE umo = ?",
-                (override_to_json(override), _to_iso(self._clock.utcnow()), umo),
+                (json.dumps(merged, ensure_ascii=False), _to_iso(self._clock.utcnow()), umo),
             )
             return cursor.rowcount > 0
 
@@ -669,7 +674,80 @@ class Repository:
             )
         return result
 
+    @staticmethod
+    def _subscription_json(raw: str | None) -> dict[str, Any]:
+        try:
+            data = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def change_product_subscription(
+        self, *, umo: str, platform: str, group_id: str, group_name: str,
+        product: str, subscribe: bool, group_limit: int,
+    ) -> tuple[str, SubscriptionRow | None]:
+        async with self._tx() as conn:
+            async with conn.execute("SELECT * FROM subscriptions WHERE umo=?", (umo,)) as cursor:
+                raw = await cursor.fetchone()
+            now = _to_iso(self._clock.utcnow())
+            if raw is None:
+                if not subscribe:
+                    return "missing", None
+                async with conn.execute("SELECT COUNT(*) FROM subscriptions WHERE enabled=1") as cursor:
+                    count = await cursor.fetchone()
+                if count[0] >= group_limit:
+                    return "limit", None
+                await conn.execute(
+                    "INSERT INTO subscriptions (subscription_id, umo, platform, group_id, group_name,"
+                    " settings_json, subscribed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (_new_id("sub", umo), umo, platform, group_id, group_name,
+                     json.dumps({"products": [product], "product_since": {product: now}}), now, now),
+                )
+            else:
+                row = self._subscription_from_row(raw)
+                if (product in row.products) == subscribe:
+                    return "unchanged", row
+                settings = self._subscription_json(raw["settings_json"])
+                products = set(row.products)
+                since = {key: _to_iso(dt) for key, dt in row.product_since.items()}
+                if subscribe:
+                    if not row.enabled:
+                        async with conn.execute(
+                            "SELECT COUNT(*) FROM subscriptions WHERE enabled=1"
+                        ) as cursor:
+                            count = await cursor.fetchone()
+                        if count[0] >= group_limit:
+                            return "limit", None
+                    products.add(product)
+                    since[product] = now
+                else:
+                    products.remove(product)
+                    since.pop(product, None)
+                    predicate = "kind != 'public_event'" if product == "codex" else (
+                        "kind = 'public_event' AND json_extract(payload_json, '$.product') = ?"
+                    )
+                    await conn.execute(
+                        "UPDATE deliveries SET status='skipped', error_code='product_unsubscribed',"
+                        " updated_at=?, next_attempt_at=NULL WHERE subscription_id=?"
+                        " AND status IN ('pending','retry')"
+                        f" AND {predicate}",
+                        (now, row.subscription_id) if product == "codex"
+                        else (now, row.subscription_id, product),
+                    )
+                settings.update(products=sorted(products), product_since=since)
+                await conn.execute(
+                    "UPDATE subscriptions SET settings_json=?, enabled=?, updated_at=?, version=version+1"
+                    " WHERE umo=?",
+                    (json.dumps(settings, ensure_ascii=False), bool(products), now, umo),
+                )
+            async with conn.execute("SELECT * FROM subscriptions WHERE umo=?", (umo,)) as cursor:
+                raw = await cursor.fetchone()
+            return "changed", self._subscription_from_row(raw)
+
     def _subscription_from_row(self, row: aiosqlite.Row) -> SubscriptionRow:
+        settings = self._subscription_json(row["settings_json"])
+        products = settings.get("products", ["codex"])
+        since = settings.get("product_since", {})
         return SubscriptionRow(
             subscription_id=str(row["subscription_id"]),
             umo=str(row["umo"]),
@@ -684,6 +762,12 @@ class Repository:
             last_failure_at=_parse_db_dt(row["last_failure_at"]),
             uncertain_count=int(row["uncertain_count"]),
             version=int(row["version"]),
+            products=tuple(x for x in products if isinstance(x, str))
+            if isinstance(products, list) else ("codex",),
+            product_since={
+                key: parsed for key, value in since.items()
+                if isinstance(value, str) and (parsed := _parse_db_dt(value)) is not None
+            } if isinstance(since, dict) else {},
         )
 
     # ------------------------------------------------------------------
@@ -693,25 +777,7 @@ class Repository:
         """记录逻辑事件；返回 True 表示 `(logical_id, state_version)` 首次出现。"""
         now_iso = _to_iso(self._clock.utcnow())
         async with self._tx() as conn:
-            cursor = await conn.execute(
-                "INSERT INTO logical_events (logical_id, state_version, kind, group_kind,"
-                " occurred_at, first_seen_at, updated_at, baseline, source_refs_json, payload_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(logical_id, state_version) DO NOTHING",
-                (
-                    ev.logical_id,
-                    ev.state_version,
-                    ev.kind,
-                    ev.group_kind,
-                    _to_iso(ev.occurred_at),
-                    now_iso,
-                    now_iso,
-                    int(bool(baseline)),
-                    json.dumps(list(ev.source_refs), ensure_ascii=False),
-                    json.dumps(dict(ev.payload), ensure_ascii=False, sort_keys=True, default=str),
-                ),
-            )
-            first_time = cursor.rowcount > 0
+            first_time = await self._insert_event(conn, ev, baseline, now_iso)
         if first_time:
             logger.info(
                 "[codex-reset][repo] logical_event new id=%s ver=%s kind=%s baseline=%s",
@@ -721,6 +787,110 @@ class Repository:
                 int(bool(baseline)),
             )
         return first_time
+
+    @staticmethod
+    async def _insert_event(
+        conn: aiosqlite.Connection, ev: LogicalEvent, baseline: bool, now_iso: str | None,
+    ) -> bool:
+        cursor = await conn.execute(
+            "INSERT INTO logical_events (logical_id, state_version, kind, group_kind,"
+            " occurred_at, first_seen_at, updated_at, baseline, source_refs_json, payload_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(logical_id, state_version) DO NOTHING",
+            (
+                ev.logical_id,
+                ev.state_version,
+                ev.kind,
+                ev.group_kind,
+                _to_iso(ev.occurred_at),
+                now_iso,
+                now_iso,
+                int(bool(baseline)),
+                json.dumps(list(ev.source_refs), ensure_ascii=False),
+                json.dumps(dict(ev.payload), ensure_ascii=False, sort_keys=True, default=str),
+            ),
+        )
+        return cursor.rowcount > 0
+
+    async def public_product_status(self, product: str) -> dict[str, Any]:
+        meta = await self.meta_get_all(f"public:{product}:")
+        rows = await self._connection().execute_fetchall(
+            "SELECT * FROM logical_events WHERE logical_id LIKE ? AND state_version <> 'observed'"
+            " ORDER BY occurred_at DESC, rowid DESC LIMIT 1",
+            (f"public:{product}:%",),
+        )
+        return {
+            "baseline": _parse_db_dt(meta.get(f"public:{product}:baseline")),
+            "success": _parse_db_dt(meta.get(f"public:{product}:success")),
+            "error": meta.get(f"public:{product}:error"),
+            "latest": self._logical_from_row(rows[0]) if rows else None,
+        }
+
+    async def record_public_snapshot(
+        self, product: str, events: Sequence[LogicalEvent], *, now: datetime,
+    ) -> tuple[bool, int]:
+        now_iso = _to_iso(now)
+        async with self._tx() as conn:
+            meta = MetaView(conn, self._clock)
+            key = f"public:{product}:baseline"
+            baseline_at = _parse_db_dt(await meta.get(key))
+            subs = [
+                self._subscription_from_row(row)
+                for row in await conn.execute_fetchall(
+                    "SELECT * FROM subscriptions WHERE enabled=1 AND platform='aiocqhttp'"
+                )
+            ]
+            count = 0
+            for ev in events:
+                first = await self._insert_event(conn, ev, baseline_at is None, now_iso)
+                state = ev.state_version
+                if not first or baseline_at is None or state == "observed":
+                    continue
+                if state == "retracted":
+                    await conn.execute(
+                        "UPDATE deliveries SET status='skipped', error_code='upstream_retracted',"
+                        " updated_at=?, next_attempt_at=NULL WHERE logical_id=?"
+                        " AND status IN ('pending','retry')",
+                        (now_iso, ev.logical_id),
+                    )
+                else:
+                    states = await conn.execute_fetchall(
+                        "SELECT state_version FROM logical_events WHERE logical_id=? AND state_version<>?",
+                        (ev.logical_id, state),
+                    )
+                    previous = {row[0] for row in states}
+                    if "retracted" in previous or (
+                        state == "announced" and previous.intersection({"reset", "claimable"})
+                    ):
+                        continue
+                    if ev.occurred_at < baseline_at and (
+                        state == "announced" or "announced" not in previous
+                    ):
+                        continue
+                for sub in subs:
+                    if product not in sub.products:
+                        continue
+                    since = sub.subscribed_since(product)
+                    if state == "retracted":
+                        delivered = await conn.execute_fetchall(
+                            "SELECT 1 FROM deliveries WHERE subscription_id=? AND logical_id=?"
+                            " AND status='delivered' AND sent_at >= ? LIMIT 1",
+                            (sub.subscription_id, ev.logical_id, _to_iso(since) or ""),
+                        )
+                        if not delivered:
+                            continue
+                    elif since is not None and ev.occurred_at < since:
+                        continue
+                    if await self._insert_delivery(
+                        conn, sub.subscription_id, sub.umo, ev, "pending", None,
+                        {"reset": 0, "announced": 1, "retracted": 1, "claimable": 2}[state], now_iso,
+                    ):
+                        count += 1
+            if baseline_at is None:
+                await meta.set(key, now_iso)
+            await meta.set(f"public:{product}:success", now_iso)
+            await meta.delete(f"public:{product}:error")
+            return baseline_at is None, count
 
     async def find_logical_by_alias(self, alias: str) -> str | None:
         """按别名查询 canonical `logical_id`（承载 D-08）。"""
@@ -896,26 +1066,9 @@ class Repository:
         )
         now_iso = _to_iso(self._clock.utcnow())
         async with self._tx() as conn:
-            cursor = await conn.execute(
-                "INSERT INTO deliveries (subscription_id, umo, logical_id, state_version, kind,"
-                " payload_json, status, attempt, next_attempt_at, created_at, updated_at, priority)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)"
-                " ON CONFLICT(subscription_id, logical_id, state_version) DO NOTHING",
-                (
-                    subscription_id,
-                    umo,
-                    ev.logical_id,
-                    ev.state_version,
-                    ev.kind,
-                    json.dumps(dict(ev.payload), ensure_ascii=False, sort_keys=True, default=str),
-                    status,
-                    _to_iso(next_attempt_at),
-                    now_iso,
-                    now_iso,
-                    resolved_priority,
-                ),
+            created = await self._insert_delivery(
+                conn, subscription_id, umo, ev, status, next_attempt_at, resolved_priority, now_iso
             )
-            created = cursor.rowcount > 0
         if created:
             logger.info(
                 "[codex-reset][repo] delivery enqueued id=%s ver=%s kind=%s sub_id=%s priority=%s",
@@ -926,6 +1079,32 @@ class Repository:
                 resolved_priority,
             )
         return created
+
+    @staticmethod
+    async def _insert_delivery(
+        conn: aiosqlite.Connection, subscription_id: str, umo: str, ev: LogicalEvent,
+        status: str, next_attempt_at: datetime | None, resolved_priority: int, now_iso: str | None,
+    ) -> bool:
+        cursor = await conn.execute(
+            "INSERT INTO deliveries (subscription_id, umo, logical_id, state_version, kind,"
+            " payload_json, status, attempt, next_attempt_at, created_at, updated_at, priority)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)"
+            " ON CONFLICT(subscription_id, logical_id, state_version) DO NOTHING",
+            (
+                subscription_id,
+                umo,
+                ev.logical_id,
+                ev.state_version,
+                ev.kind,
+                json.dumps(dict(ev.payload), ensure_ascii=False, sort_keys=True, default=str),
+                status,
+                _to_iso(next_attempt_at),
+                now_iso,
+                now_iso,
+                resolved_priority,
+            ),
+        )
+        return cursor.rowcount > 0
 
     async def claim_pending_deliveries(self, now: datetime, limit: int = 10) -> list[DeliveryTask]:
         """单事务认领：`pending/retry` 且到期 → `inflight` + `attempt+1`（并发安全）。
@@ -977,6 +1156,27 @@ class Repository:
                 "UPDATE subscriptions SET last_success_at=?, updated_at=? WHERE subscription_id=?",
                 (now_iso, now_iso, task.subscription_id),
             )
+            if task.kind == "public_event" and task.state_version != "retracted":
+                # An announcement can be withdrawn while the platform is accepting its message.
+                retractions = await conn.execute_fetchall(
+                    "SELECT * FROM logical_events WHERE logical_id=? AND state_version='retracted'",
+                    (task.logical_id,),
+                )
+                subscribers = await conn.execute_fetchall(
+                    "SELECT * FROM subscriptions WHERE subscription_id=? AND enabled=1",
+                    (task.subscription_id,),
+                )
+                if retractions and subscribers:
+                    sub = self._subscription_from_row(subscribers[0])
+                    product = str(task.payload.get("product") or "")
+                    since = sub.subscribed_since(product)
+                    if product in sub.products and (
+                        since is None or task.created_at is not None and task.created_at >= since
+                    ):
+                        await self._insert_delivery(
+                            conn, sub.subscription_id, sub.umo, self._logical_from_row(retractions[0]),
+                            "pending", None, 1, now_iso,
+                        )
         task.status = "delivered"
         task.updated_at = ensure_utc(now)
         logger.info(

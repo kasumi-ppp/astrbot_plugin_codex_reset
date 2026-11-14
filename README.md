@@ -1,6 +1,6 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License: AGPL-3.0"></a>
-  <a href="https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"><img src="https://img.shields.io/badge/version-v1.5.0-brightgreen" alt="Version: v1.5.0"></a>
+  <a href="https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"><img src="https://img.shields.io/badge/version-v1.6.0-brightgreen" alt="Version: v1.6.0"></a>
   <a href="https://astrbot.app"><img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-blueviolet" alt="AstrBot: >=4.16,<5"></a>
   <a href="https://github.com/botuniverse/onebot-11"><img src="https://img.shields.io/badge/platform-aiocqhttp%20(OneBot%20v11)-orange" alt="Platform: aiocqhttp (OneBot v11)"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-%3E%3D3.12-blue" alt="Python: >=3.12"></a>
@@ -11,7 +11,7 @@
 AstrBot 插件：读取第三方站点 [codex-reset.com](https://codex-reset.com/) 的公开数据，向订阅的 QQ 群推送
 **Codex 全球重置确认、提前预警、重置概率、额外重置权益动态**四类消息。
 
-- 版本 `v1.5.0`｜作者 `kasumi-ppp`｜许可 **AGPL-3.0**｜Python `>=3.12`｜AstrBot `>=4.16,<5`｜平台 `aiocqhttp`（OneBot v11）
+- 版本 `v1.6.0`｜作者 `kasumi-ppp`｜许可 **AGPL-3.0**｜Python `>=3.12`｜AstrBot `>=4.16,<5`｜平台 `aiocqhttp`（OneBot v11）
 - 每条消息都含独立一行 `数据来源：https://codex-reset.com/`（**不可关闭**，许可要求）
 
 ## 🚀 功能
@@ -90,14 +90,14 @@ pip install -r astrbot_plugin_codex_reset/requirements.txt
 | `/cr credits` | 最近额外重置权益动态 | 群成员 | 15s | 否 |
 | `/cr history [n]` | 最近 n 条**已确认重置**（默认 3，上限 10，超出截断提示；已撤回的更正不计入） | 群成员 | 15s | 否 |
 | `/cr help` | 指令说明 + 权限表 + `/codexreset` 备用说明 | 群成员 | 15s | 否 |
-| `/cr subscribe` | 订阅当前群（`umo` 取自真实群会话） | AstrBot 管理员 | 5s | 否 |
-| `/cr unsubscribe` | 取消当前群订阅 | AstrBot 管理员 | 5s | 否 |
+| `/cr subscribe [PRODUCT]` | 订阅当前群；不带产品名保持旧行为（Codex） | AstrBot 管理员 | 5s | 否 |
+| `/cr unsubscribe [PRODUCT]` | 取消当前群订阅；不带产品名保持旧行为（Codex） | AstrBot 管理员 | 5s | 否 |
 | `/cr settings` | 本群生效配置与来源（群覆盖 / 全局默认） | AstrBot 管理员 | 5s | 否 |
 | `/cr set reset\|watch\|forecast\|credits\|daily on\|off` | 按群开关一类通知（`daily` = 每日预测图片） | AstrBot 管理员 | 5s | 否 |
 | `/cr set p24\|p48 <0-100>` | 按群设置概率阈值（越界拒绝并回显合法区间） | AstrBot 管理员 | 5s | 否 |
 | `/cr groups` | 订阅群列表 + 推送健康（最近成功/失败、uncertain 计数），建议私聊 | AstrBot 管理员 | 10s | 否 |
 | `/cr report` | 立即生成并发送当日预测图片（手动触发，**不占用**每日自动额度） | AstrBot 管理员 | 60s | 否 |
-| `/cr test` | 当前群发送一条标注「测试」的样例消息（不入库、不建投递） | AstrBot 管理员 | 60s | 否 |
+| `/cr test [PRODUCT]` | 当前群发送指定产品的样例消息；省略产品名保持 Codex 旧行为（不入库、不建投递） | AstrBot 管理员 | 60s | 否 |
 | `/cr test image` | 发送一张标注「测试图片」的当日预测图片（不入库、不影响日报去重） | AstrBot 管理员 | 60s | 否 |
 
 所有查询命令**只读内存缓存与 SQLite**，不会触发任何上游请求，响应不会被采集阻塞（AC-21）。
@@ -105,13 +105,23 @@ pip install -r astrbot_plugin_codex_reset/requirements.txt
 **只读模式**下（同库另一实例在运行）只提供查询，写指令统一回复「只读模式」。
 审计、限频与 `uncertain` 语义见 [`docs/usage-notes.md`](docs/usage-notes.md)。
 
+### 多产品订阅（v1.6.0）
+
+`PRODUCT` 支持 `codex`、`claude`、`grok-bot`、`grok-build`、`antigravity-gemini`。裸 `/cr subscribe` 和 `/cr test` 仍用于 Codex，裸 `/cr unsubscribe` 取消本群所有产品。用 `/cr status` 查看各产品及本群订阅。
+
+新增产品默认关闭。仅当管理员显式将对应配置打开后才会采集：`enable_claude`、`enable_grok_bot`、`enable_grok_build`、`enable_antigravity_gemini`。订阅只选择群要接收的产品；全局关闭的产品不会请求上游或推送。各源的事件字段与证据命令见 [`docs/ACCEPTANCE-RUNBOOK.md`](docs/ACCEPTANCE-RUNBOOK.md) §10。
+
 ## ⚙️ 配置
 
-`_conf_schema.json` 共 26 个字段，「可被群覆盖」列为「是」的可用 `/cr set` 或 WebUI 卡片按群调整。
+`_conf_schema.json` 共 30 个字段，「可被群覆盖」列为「是」的可用 `/cr set` 或 WebUI 卡片按群调整。
 
 | 字段 | 类型 | 默认 | 说明 | 可被群覆盖 |
 |---|---|---|---|---|
 | `enable_monitor` | bool | `true` | 总开关；关闭后不采集，但投递队列继续消化，查询读缓存 | 否 |
+| `enable_claude` | bool | `false` | Claude 额度/重置监控总开关 | 否 |
+| `enable_grok_bot` | bool | `false` | Grok Bot 额度/重置监控总开关 | 否 |
+| `enable_grok_build` | bool | `false` | Grok Build 额度/重置监控总开关 | 否 |
+| `enable_antigravity_gemini` | bool | `false` | Antigravity Gemini 额度/重置监控总开关 | 否 |
 | `enable_confirmed_reset` | bool | `true` | 推送「重置已确认」 | 是 |
 | `enable_watch` | bool | `true` | 推送「提前预警」 | 是 |
 | `enable_forecast` | bool | `true` | 推送「概率预测」 | 是 |

@@ -661,13 +661,14 @@ def test_status_snapshot_is_read_only(tmp_path, monkeypatch):
 
     assert before == {"ready": False, "readonly": False}
     assert snapshot["ready"] is True
-    # 投递任务 + 每日报告任务 + 配置热更新任务（后者即使 enable_monitor=false 也必须常驻）
-    assert snapshot["tasks"] == 3
+    # 投递、日报、公开来源及配置热更新任务。
+    assert snapshot["tasks"] == 4
     assert sorted(names) == sorted(
         [
             "codex-reset-config-watch",
             "codex-reset-delivery",
             "codex-reset-daily-report",
+            "codex-reset-public",
         ]
     )
     assert snapshot["groups"] == 0
@@ -935,3 +936,38 @@ def test_heartbeat_is_throttled_to_avoid_wal_amplification(tmp_path, monkeypatch
     assert baseline is not None
     assert throttled == baseline, "间隔内重复调用不得写库"
     assert refreshed != baseline, "超过间隔后必须刷新心跳"
+
+
+def test_product_command_uses_astrbot_proactive_send(tmp_path, monkeypatch):
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    class GroupEvent:
+        unified_msg_origin = "aiocqhttp:GroupMessage:123"
+        get_group_id = staticmethod(lambda: "123")
+        get_platform_name = staticmethod(lambda: "aiocqhttp")
+        is_admin = staticmethod(lambda: True)
+        plain_result = staticmethod(lambda text: text)
+
+    async def scenario():
+        context = FakeContext()
+        plugin = main.CodexResetRadar(context, {"enable_monitor": False})
+        await plugin.initialize()
+        try:
+            event = GroupEvent()
+            reply = [part async for part in plugin.cr(event, "subscribe grok-build")]
+            assert "Grok Build" in reply[0]
+            row = await plugin.repo.get_subscription(event.unified_msg_origin)
+            assert row.products == ("grok-build",)
+            assert [part async for part in plugin.cr(event, "test grok-build")] == []
+            assert len(context.sent) == 1
+            target, message = context.sent[0]
+            assert target == event.unified_msg_origin
+            text, = message.chain
+            assert "测试消息" in text and "Grok Build" in text and "quotaresets.com" in text
+            assert await plugin.repo.count_deliveries() == 0
+            status = [part async for part in plugin.cr(event, "status")]
+            assert "本群订阅：Grok Build" in status[0]
+        finally:
+            await plugin.terminate()
+
+    run(scenario())

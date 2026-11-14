@@ -280,6 +280,10 @@ def build_plugin_settings(raw: Mapping[str, object] | None) -> PluginSettings:
         daily_report_retry_minutes=retry_minutes,
         daily_report_expiry_minutes=expiry_minutes,
         daily_report_text_fallback=_coerce_bool(data, "daily_report_text_fallback", True, warnings),
+        enable_claude=_coerce_bool(data, "enable_claude", False, warnings),
+        enable_grok_bot=_coerce_bool(data, "enable_grok_bot", False, warnings),
+        enable_grok_build=_coerce_bool(data, "enable_grok_build", False, warnings),
+        enable_antigravity_gemini=_coerce_bool(data, "enable_antigravity_gemini", False, warnings),
         warnings=tuple(warnings),
     )
     for warning in warnings:

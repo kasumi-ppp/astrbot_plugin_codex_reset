@@ -23,6 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 #: PRD §7 冻结的 25 个全局字段 + `group_overrides`（v1.3.0 新增 7 个每日报告字段）
 GLOBAL_FIELDS: dict[str, tuple[str, Any]] = {
     "enable_monitor": ("bool", True),
+    "enable_claude": ("bool", False),
+    "enable_grok_bot": ("bool", False),
+    "enable_grok_build": ("bool", False),
+    "enable_antigravity_gemini": ("bool", False),
     "enable_confirmed_reset": ("bool", True),
     "enable_watch": ("bool", True),
     "enable_forecast": ("bool", True),
@@ -166,7 +170,7 @@ def test_metadata_yaml_is_parseable_and_correct() -> None:
     metadata = _parse_metadata((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_codex_reset"
     assert metadata["display_name"] == "Codex 重置雷达"
-    assert metadata["version"] == "v1.5.0"
+    assert metadata["version"] == "v1.6.0"
     assert metadata["author"] == "kasumi-ppp"
     assert metadata["repo"] == "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
     assert metadata["astrbot_version"] == ">=4.16,<5"
@@ -182,7 +186,7 @@ def test_main_py_compiles_and_declares_plugin() -> None:
     compile(source, "main.py", "exec")  # 语法错误会直接抛
     assert '@register(\n    PLUGIN_NAME,' in source or '@register(PLUGIN_NAME' in source
     assert 'PLUGIN_NAME = "astrbot_plugin_codex_reset"' in source
-    assert 'PLUGIN_VERSION = "1.5.0"' in source
+    assert 'PLUGIN_VERSION = "1.6.0"' in source
     assert "from .services.log import set_logger as set_service_logger" in source
     assert "set_service_logger(logger)" in source
     # 单指令 + GreedyStr 手工分派（不用 command_group）

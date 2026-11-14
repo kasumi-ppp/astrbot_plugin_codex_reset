@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [v1.6.0] - 2026-11-14
+
+### 新增
+
+- 多产品配额重置监控：Claude、Grok Bot、Grok Build、Antigravity Gemini；新增产品开关默认关闭。
+- `/cr subscribe PRODUCT`、`/cr unsubscribe PRODUCT`、`/cr test PRODUCT` 支持按产品操作；不带产品名的旧命令行为保持 Codex 语义，`/cr status` 汇总产品状态。
+- 增加容器内源码核验、SQLite 在线备份、产品基线与 QQ 端到端验收和回滚步骤。文档明确区分示例/模拟数据与真实来源验证；本记录不声称已完成生产环境验收。
+
 ## [v1.5.0] - 2026-11-01
 
 ### 安全与兼容

@@ -337,6 +337,10 @@ class PluginSettings:
     daily_report_retry_minutes: int = 5
     daily_report_expiry_minutes: int = 30
     daily_report_text_fallback: bool = True
+    enable_claude: bool = False
+    enable_grok_bot: bool = False
+    enable_grok_build: bool = False
+    enable_antigravity_gemini: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -500,6 +504,11 @@ class SubscriptionRow:
     last_failure_at: datetime | None = None
     uncertain_count: int = 0
     version: int = 1
+    products: tuple[str, ...] = ("codex",)
+    product_since: dict[str, datetime] = field(default_factory=dict)
+
+    def subscribed_since(self, product: str) -> datetime | None:
+        return self.product_since.get(product, self.subscribed_at)
 
 
 @dataclass(frozen=True, slots=True)
