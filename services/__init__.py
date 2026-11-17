@@ -1,4 +1,4 @@
-"""Codex 重置雷达的纯 Python 内核层。
+"""AI 额度雷达的纯 Python 内核层。
 
 硬约束：本包内任何模块都不得依赖 AstrBot（astrbot 包），相关适配只允许出现在 `main.py`。
 依赖方向严格单向：

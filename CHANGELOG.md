@@ -1,9 +1,14 @@
 # Changelog
 
-本文件记录 Codex 重置雷达的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+本文件记录 AI 额度雷达（原 Codex 重置雷达）的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 `vMAJOR.MINOR.PATCH`。
 
 ## [Unreleased]
+
+## [v1.6.1] - 2026-11-17
+
+- 展示名更新为「AI 额度雷达」，涵盖 Codex、Claude、Grok Bot、Grok Build 和 Antigravity Gemini。
+- 以新版本重新提交 v1.6.0 的多产品功能。插件 ID、群订阅和 /cr 命令沿用原值。
 
 ## [v1.6.0] - 2026-11-14
 

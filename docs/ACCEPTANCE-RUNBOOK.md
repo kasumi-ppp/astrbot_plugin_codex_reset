@@ -1,4 +1,4 @@
-# 验收执行单（Runbook）· Codex 重置雷达 V1.6.0
+# 验收执行单（Runbook）· AI 额度雷达 V1.6.1
 
 > `docs/ACCEPTANCE.md` 是**覆盖矩阵**（有没有覆盖）；本文是**执行手册**（今天怎么敲、看到什么算过）。
 > 二者不重复：本文不重抄 AC-01~24 场景，只给可粘贴命令、**逐字**期望文案与判定口径。
@@ -50,7 +50,7 @@ PY
 
 **A-1 `/cr`**
 - 操作：群里发 `/cr`。
-- 期望：首行 `📡【Codex 重置雷达 · 状态】`，并**逐行**含（顺序固定）：
+- 期望：首行 `📡【AI 额度雷达 · 状态】`，并**逐行**含（顺序固定）：
   `监控开关：开启`（关时 `监控开关：已关闭（enable_monitor=false）`）；`最近采集：<时间>` 或 `最近采集：暂无记录`；
   `最新预测：` 二选一 `还没有可用的 forecast 快照` / `24h N% / 48h N%（置信度：低|中|高|未知）`；
   `订阅群数：N`；末行独立署名 `数据来源：https://codex-reset.com/`。
@@ -61,7 +61,7 @@ PY
 
 **A-2 `/cr help`**
 - 操作：发 `/cr help`。
-- 期望：首行 `📖【Codex 重置雷达 · 指令说明】`，且**逐字**出现这 12 个子命令：
+- 期望：首行 `📖【AI 额度雷达 · 指令说明】`，且**逐字**出现这 12 个子命令：
   `/cr 或 /cr status`、`/cr forecast`、`/cr latest`、`/cr credits`、`/cr history [n]`、`/cr help`、
   `/cr subscribe`、`/cr unsubscribe`、`/cr settings`、`/cr set <项> <值>`、`/cr groups`、`/cr test`；
   以及两行：
@@ -407,7 +407,7 @@ E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵�
 **本文不覆盖**：多群并发（AC-13）仅建议抽查两群；>7 天长期 WAL/内存增长与审计跨月切分归长稳；
 上游字段变更（AC-23）不可主动构造，不建议为验收伪造站点响应。
 
-## 10. v1.6.0 多产品采集验收
+## 10. v1.6.1 多产品采集验收
 
 本节验收 Claude、Grok Bot、Grok Build、Antigravity Gemini。四个新增全局开关
 `enable_claude`、`enable_grok_bot`、`enable_grok_build`、`enable_antigravity_gemini` 均默认 `false`；
@@ -431,7 +431,7 @@ endpoints = {
     "agy-status": "https://www.agyresets.com/api/v1/status",
 }
 headers = {
-    "User-Agent": "AstrBot Codex Reset Radar/1.6.0 "
+    "User-Agent": "AstrBot Codex Reset Radar/1.6.1 "
                   "(+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)",
     "Accept": "application/json",
     "Accept-Encoding": "identity",
@@ -472,7 +472,7 @@ docker exec -i astrbot python3 - <<'PY'
 import sqlite3
 from pathlib import Path
 src = Path('/AstrBot/data/plugin_data/astrbot_plugin_codex_reset/codex_reset.db')
-dst = src.with_name('codex_reset.pre-v1.6.0.backup.db')
+dst = src.with_name('codex_reset.pre-v1.6.1.backup.db')
 with sqlite3.connect(f'file:{src}?mode=ro', uri=True) as source, sqlite3.connect(dst) as backup:
     source.backup(backup)
     result = backup.execute('PRAGMA integrity_check').fetchone()[0]
@@ -550,7 +550,7 @@ PY
 #
 # ↓↓↓ 再切回【非管理员小号】
 /cr status
-# → 期望首行：📡【Codex 重置雷达 · 状态】
+# → 期望首行：📡【AI 额度雷达 · 状态】
 /cr forecast
 # → 期望首行：📈【重置概率预测】（首轮未采集时会是「暂无数据：尚未完成首轮采集，请稍后再试。」）
 ```
@@ -638,7 +638,7 @@ PY
  3 小号     群A  /cr unsubscribe            # 仅管理员可执行该指令。…
  4 小号     群A  /cr set forecast off       # 仅管理员可执行该指令。…
  5 管理员   群A  /cr settings               # ⚙️【本群生效配置】 / 6 行全「（全局默认）」
- 6 小号     群A  /cr status                 # 📡【Codex 重置雷达 · 状态】
+ 6 小号     群A  /cr status                 # 📡【AI 额度雷达 · 状态】
  7 小号     群A  /cr forecast               # 📈【重置概率预测】或「暂无数据：…」
  8 管理员   群A  /cr test                   # 🧪【测试消息】以下为样例，非真实事件
  9 管理员   群A  /cr unsubscribe            # ✅ 已取消订阅：…

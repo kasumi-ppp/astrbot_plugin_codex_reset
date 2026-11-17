@@ -1,8 +1,8 @@
-# Codex 重置雷达
+# AI 额度雷达
 
 **把 AI 额度重置公告推送到 QQ 群。** 群管理员可以按产品订阅，通知附带适用范围和来源链接。
 
-`v1.6.0` · AstrBot `>=4.16,<5` · Python `>=3.12` · QQ 适配器 `aiocqhttp`（OneBot v11）
+`v1.6.1` · AstrBot `>=4.16,<5` · Python `>=3.12` · QQ 适配器 `aiocqhttp`（OneBot v11）
 
 ## 能监控什么
 

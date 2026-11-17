@@ -145,7 +145,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 HELP_TEXT = "\n".join(
     [
-        "📖【Codex 重置雷达 · 指令说明】",
+        "📖【AI 额度雷达 · 指令说明】",
         "",
         "查询（群成员）：",
         "/cr 或 /cr status  监控状态、最近重置、预告状态与数据新鲜度",
@@ -338,7 +338,7 @@ class CommandService:
     ) -> str:
         latest, stale = self._read.freshness(now)
         subs = await self._repo.list_subscriptions()
-        lines = ["📡【Codex 重置雷达 · 状态】", ""]
+        lines = ["📡【AI 额度雷达 · 状态】", ""]
         lines.append(
             "监控开关：" + ("开启" if plugin.enable_monitor else "已关闭（enable_monitor=false）")
         )

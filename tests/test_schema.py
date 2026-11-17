@@ -169,8 +169,8 @@ def test_schema_defaults_match_plugin_settings_defaults() -> None:
 def test_metadata_yaml_is_parseable_and_correct() -> None:
     metadata = _parse_metadata((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_codex_reset"
-    assert metadata["display_name"] == "Codex 重置雷达"
-    assert metadata["version"] == "v1.6.0"
+    assert metadata["display_name"] == "AI 额度雷达"
+    assert metadata["version"] == "v1.6.1"
     assert metadata["author"] == "kasumi-ppp"
     assert metadata["repo"] == "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
     assert metadata["astrbot_version"] == ">=4.16,<5"
@@ -186,7 +186,7 @@ def test_main_py_compiles_and_declares_plugin() -> None:
     compile(source, "main.py", "exec")  # 语法错误会直接抛
     assert '@register(\n    PLUGIN_NAME,' in source or '@register(PLUGIN_NAME' in source
     assert 'PLUGIN_NAME = "astrbot_plugin_codex_reset"' in source
-    assert 'PLUGIN_VERSION = "1.6.0"' in source
+    assert 'PLUGIN_VERSION = "1.6.1"' in source
     assert "from .services.log import set_logger as set_service_logger" in source
     assert "set_service_logger(logger)" in source
     # 单指令 + GreedyStr 手工分派（不用 command_group）

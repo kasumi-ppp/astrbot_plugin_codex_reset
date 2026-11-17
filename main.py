@@ -94,7 +94,7 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.6.1"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
 PLUGIN_DESC = "向订阅群推送 Codex、Claude、Grok 和 Antigravity Gemini 公开额度事件"
@@ -220,7 +220,7 @@ class _PluginHooks(NullPipelineHooks):
     repo=PLUGIN_REPO,
 )
 class CodexResetRadar(Star):
-    """Codex 重置雷达插件主体（Star 子类）。"""
+    """AI 额度雷达插件主体（Star 子类）。"""
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
         """构造时只保存配置与基础设施句柄，不做 I/O（真正的初始化在 `initialize`）。"""
