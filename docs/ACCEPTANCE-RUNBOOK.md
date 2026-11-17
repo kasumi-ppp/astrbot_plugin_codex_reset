@@ -1,4 +1,4 @@
-# 验收执行单（Runbook）· AI 额度雷达 V1.6.1
+# 验收执行单（Runbook）· AI 额度雷达 V1.6.2
 
 > `docs/ACCEPTANCE.md` 是**覆盖矩阵**（有没有覆盖）；本文是**执行手册**（今天怎么敲、看到什么算过）。
 > 二者不重复：本文不重抄 AC-01~24 场景，只给可粘贴命令、**逐字**期望文案与判定口径。
@@ -407,7 +407,7 @@ E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵�
 **本文不覆盖**：多群并发（AC-13）仅建议抽查两群；>7 天长期 WAL/内存增长与审计跨月切分归长稳；
 上游字段变更（AC-23）不可主动构造，不建议为验收伪造站点响应。
 
-## 10. v1.6.1 多产品采集验收
+## 10. v1.6.2 多产品采集验收
 
 本节验收 Claude、Grok Bot、Grok Build、Antigravity Gemini。四个新增全局开关
 `enable_claude`、`enable_grok_bot`、`enable_grok_build`、`enable_antigravity_gemini` 均默认 `false`；
@@ -431,7 +431,7 @@ endpoints = {
     "agy-status": "https://www.agyresets.com/api/v1/status",
 }
 headers = {
-    "User-Agent": "AstrBot Codex Reset Radar/1.6.1 "
+    "User-Agent": "AstrBot Codex Reset Radar/1.6.2 "
                   "(+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)",
     "Accept": "application/json",
     "Accept-Encoding": "identity",
@@ -472,7 +472,7 @@ docker exec -i astrbot python3 - <<'PY'
 import sqlite3
 from pathlib import Path
 src = Path('/AstrBot/data/plugin_data/astrbot_plugin_codex_reset/codex_reset.db')
-dst = src.with_name('codex_reset.pre-v1.6.1.backup.db')
+dst = src.with_name('codex_reset.pre-v1.6.2.backup.db')
 with sqlite3.connect(f'file:{src}?mode=ro', uri=True) as source, sqlite3.connect(dst) as backup:
     source.backup(backup)
     result = backup.execute('PRAGMA integrity_check').fetchone()[0]

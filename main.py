@@ -94,7 +94,7 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.6.1"
+PLUGIN_VERSION = "1.6.2"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
 PLUGIN_DESC = "向订阅群推送 Codex、Claude、Grok 和 Antigravity Gemini 公开额度事件"

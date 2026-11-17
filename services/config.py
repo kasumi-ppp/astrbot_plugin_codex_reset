@@ -452,7 +452,11 @@ def override_to_card(
     group_name: str = "",
 ) -> dict[str, object]:
     """稀疏覆盖 → WebUI 卡片（卡片永远是完整值，缺失字段填全局默认）。"""
-    card: dict[str, object] = {"subscription_id": subscription_id, "group_name": group_name}
+    card: dict[str, object] = {
+        "__template_key": "group_card",
+        "subscription_id": subscription_id,
+        "group_name": group_name,
+    }
     for name in OVERRIDE_FIELDS:
         value = getattr(override, name)
         card[name] = getattr(plugin.defaults, name) if value is None else value

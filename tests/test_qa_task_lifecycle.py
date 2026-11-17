@@ -633,6 +633,7 @@ def test_apply_config_cards_handles_stale_unknown_and_duplicate(tmp_path, monkey
     assert result["fresh"] == {"enable_credits": False}
     assert len(result["cards"]) == 1, "投影后卡片必须与 DB 一致"
     assert result["cards"][0]["_version"] == 2
+    assert result["cards"][0]["__template_key"] == "group_card"
     duplicate = result["duplicate"]
     # 卡片被视为「该群的完整状态快照」：并列版本取首个卡片
     assert duplicate.get("enable_watch") is False, "并列版本应取首个卡片"
@@ -958,6 +959,9 @@ def test_product_command_uses_astrbot_proactive_send(tmp_path, monkeypatch):
             assert "Grok Build" in reply[0]
             row = await plugin.repo.get_subscription(event.unified_msg_origin)
             assert row.products == ("grok-build",)
+            card, = plugin.config["group_overrides"]
+            assert card["__template_key"] == "group_card"
+            assert card["subscription_id"] == row.subscription_id
             assert [part async for part in plugin.cr(event, "test grok-build")] == []
             assert len(context.sent) == 1
             target, message = context.sent[0]
