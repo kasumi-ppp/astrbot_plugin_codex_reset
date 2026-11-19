@@ -13,7 +13,10 @@ from .public_messages import product_enabled
 from .public_sources import SOURCES, PublicEvent, PublicSourceClient, SourceError
 from .repository import Repository
 
-_STATE_ORDER = {"observed": 0, "announced": 1, "reset": 2, "claimable": 2, "retracted": 3}
+_STATE_ORDER = {
+    "observed": 0, "watch": 1, "forecast": 1, "announced": 2, "reset": 3, "claimable": 3, "retracted": 4,
+}
+_POLL_INTERVAL = {"agy": 60, "grok": 60, "claude": 300}
 
 
 def _logical(event: PublicEvent) -> LogicalEvent:
@@ -32,6 +35,7 @@ def _logical(event: PublicEvent) -> LogicalEvent:
             "source_url": event.source_url,
             "summary": event.summary,
             "expires_at": event.expires_at.isoformat() if event.expires_at else None,
+            "probabilities": event.probabilities,
         },
     )
 
@@ -73,21 +77,22 @@ class PublicMonitor:
         try:
             events = await self.client.fetch(source)
             now = self.clock.utcnow()
+            plugin = self.settings()
             for product in products:
-                if not product_enabled(self.settings(), product):
+                if not product_enabled(plugin, product):
                     continue
                 ordered = sorted(
                     (e for e in events if e.product == product
-                     and (e.expires_at is None or e.expires_at > now or e.state != "claimable")),
+                     and (e.expires_at is None or e.expires_at > now
+                          or e.state not in {"watch", "forecast", "claimable"})),
                     key=lambda e: (e.event_id, _STATE_ORDER[e.state], e.occurred_at),
                 )
-                # A retracted record must win over older states supplied in the same snapshot.
-                retracted = {e.event_id for e in ordered if e.state == "retracted"}
-                logical = [
-                    _logical(e) for e in ordered
-                    if e.event_id not in retracted or e.state == "retracted"
-                ]
-                seeded, deliveries = await self.repo.record_public_snapshot(product, logical, now=now)
+                # In one snapshot a confirmation supersedes its hint, and a withdrawal supersedes both.
+                newest = {event.event_id: event for event in ordered}
+                logical = [_logical(event) for event in newest.values()]
+                seeded, deliveries = await self.repo.record_public_snapshot(
+                    product, logical, now=now, plugin=plugin
+                )
                 logger.info(
                     "[codex-reset][public] product=%s baseline=%s events=%s deliveries=%s",
                     product, seeded, len(logical), deliveries,
@@ -114,4 +119,4 @@ class PublicMonitor:
         async with self.repo.atomic_meta() as meta:
             await meta.delete(f"public:source:{source}:failures")
             await meta.delete(f"public:source:{source}:retry_at")
-        return 300
+        return _POLL_INTERVAL[source]

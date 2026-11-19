@@ -970,7 +970,8 @@ def test_product_command_uses_astrbot_proactive_send(tmp_path, monkeypatch):
             assert "测试消息" in text and "Grok Build" in text and "quotaresets.com" in text
             assert await plugin.repo.count_deliveries() == 0
             status = [part async for part in plugin.cr(event, "status")]
-            assert "本群订阅：Grok Build" in status[0]
+            assert "Grok Build：暂无确认记录" in status[0]
+            assert "Codex" not in status[0]
         finally:
             await plugin.terminate()
 

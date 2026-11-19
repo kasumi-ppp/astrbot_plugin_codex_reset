@@ -22,7 +22,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from .classifier import EventClassifier, ForecastEvaluator, _window_dict
+from .classifier import EventClassifier, ForecastEvaluator
 from .client import ENDPOINTS, SourceClient
 from .clock import Clock, ensure_utc
 from .config import resolve_group_settings
@@ -36,25 +36,18 @@ from .models import (
     GroupSettings,
     ImageSendFn,
     IngestOutcome,
-    LatestAlert,
     LogicalEvent,
     ParseResult,
     PluginSettings,
-    ReportData,
     SnapshotRow,
     SubscriptionRow,
     TimelineSnapshot,
 )
-from .notifications import (
-    CATEGORY_FLAGS,
-    DeliveryWorker,
-    decision_payload,
-    render_daily_report_text,
-    watch_window_text,
-)
+from .notifications import CATEGORY_FLAGS, DeliveryWorker, decision_payload
 from .parser import parse_feed, parse_forecast, parse_timeline
-from .report_renderer import ReportRenderError, ensure_theme, render_report_png
+from .report_renderer import ReportRenderError, ensure_theme, render_reset_report_png
 from .repository import Repository
+from .reset_summary import read_reset_summary, render_reset_summary_text
 from .scheduler import DailyReportScheduler, SourceScheduler
 
 SettingsProvider = Callable[[], PluginSettings]
@@ -126,7 +119,7 @@ class Pipeline:
     ) -> None:
         """所有依赖由外部注入（便于用假实现做零 I/O 测试）。
 
-        `image_send` 是每日预测图片的出站通道（P01 / P09 / G09）；缺省 `None` 表示
+        `image_send` 是每日重置简报的图片出站通道；缺省 `None` 表示
         本实例不支持发图，每日报告会按配置降级为文本或标记失败。
         `readonly_provider` 返回 True 时（另一实例持锁）不创建任何日报投递（S07）。
         """
@@ -855,7 +848,7 @@ class Pipeline:
         }
 
     # ------------------------------------------------------------------
-    # 每日预测图片（P01 / P03 / P04 / P05 / P08 / P10 / P11 / G08 / S07）
+    # 每日重置简报
     # ------------------------------------------------------------------
     def daily_scheduler(self) -> DailyReportScheduler:
         """按**当前**全局配置构建（或热更新）日报调度器（P02 改配置立即生效）。"""
@@ -878,7 +871,7 @@ class Pipeline:
         return self._daily_scheduler
 
     async def run_daily_reports(self, now: datetime) -> int:
-        """判定并投递每日预测图片；返回本 tick 实际发送的群数。
+        """判定并投递每日重置简报；返回本 tick 实际发送的群数。
 
         独立于实时监控任务运行（P01）：不占用 `deliveries` 队列，也不受概率阈值
         冷却影响（F05「每日报告不占用概率阈值提醒的冷却次数」）。
@@ -897,7 +890,7 @@ class Pipeline:
             return 0
         sent = 0
         for sub in await self._repo.list_subscriptions():
-            if not sub.enabled or "codex" not in sub.products:
+            if not sub.enabled or not sub.products or sub.platform != "aiocqhttp":
                 continue
             settings = resolve_group_settings(plugin, sub.override)
             if not settings.enable_daily_report:
@@ -912,7 +905,7 @@ class Pipeline:
                 continue
             elif row.status == "failed" and scheduler.within_retry(row.updated_at, moment):
                 continue
-            if await self._deliver_daily_report(sub, business_date, moment, plugin, scheduler):
+            if await self._deliver_daily_report(sub, business_date, moment, plugin):
                 sent += 1
         if sent:
             logger.info(
@@ -926,37 +919,12 @@ class Pipeline:
         business_date: str,
         now: datetime,
         plugin: PluginSettings,
-        scheduler: DailyReportScheduler,
     ) -> bool:
         """给单个群发送一次日报；失败按配置降级/重试，状态全部落库（S02）。"""
-        data = await self.build_report_data(now, business_date=business_date)
-        if data is None:
-            # P11：无法获取有效数据 → 跳过当次日报并留下错误记录，绝不伪造报告
-            await self._repo.update_daily_report(
-                sub.subscription_id, business_date, status="skipped", error_code="no_data"
-            )
-            logger.error(
-                "[codex-reset][pipeline] daily_report skipped sub_id=%s date=%s reason=no_data",
-                sub.subscription_id,
-                business_date,
-            )
-            return False
-        if data.stale:
-            await self._repo.update_daily_report(
-                sub.subscription_id, business_date, status="skipped", error_code="stale_data"
-            )
-            logger.error(
-                "[codex-reset][pipeline] daily_report skipped sub_id=%s date=%s reason=stale_data",
-                sub.subscription_id,
-                business_date,
-            )
-            return False
-
-        payload = data.as_payload()
-        tz = self._tz_provider()
+        payload = await self._reset_report_payload(sub.products, theme=plugin.daily_report_theme)
         try:
             png = await asyncio.wait_for(
-                asyncio.to_thread(render_report_png, data, tz=tz),
+                asyncio.to_thread(render_reset_report_png, payload),
                 timeout=REPORT_RENDER_TIMEOUT_SECONDS,
             )
         except ReportRenderError as exc:
@@ -983,7 +951,7 @@ class Pipeline:
         if self._image_send is None:
             return await self._fallback_daily_text(sub, business_date, payload, plugin, now)
         try:
-            accepted = await self._image_send(sub.umo, png, self._report_filename(data))
+            accepted = await self._image_send(sub.umo, png, f"ai-quota-resets-{business_date}.png")
         except TimeoutError:
             # 发送结果不确定 → 不补发文本（P10），记终态 uncertain
             await self._repo.update_daily_report(
@@ -1030,7 +998,7 @@ class Pipeline:
                 next_attempt_at=now + timedelta(minutes=plugin.daily_report_retry_minutes),
             )
             return False
-        text = render_daily_report_text(payload, tz=self._tz_provider(), settings=plugin)
+        text = render_reset_summary_text(payload["resets"])
         try:
             accepted = await self._worker.send_text(sub.umo, text)
         except TimeoutError:
@@ -1061,29 +1029,15 @@ class Pipeline:
         return False
 
     async def manual_report_png(
-        self, *, now: datetime, test: bool = False, theme: str | None = None
-    ) -> tuple[bytes | None, dict[str, Any] | None, str | None]:
-        """`/cr report` / `/cr test image` 手动渲染（P09 / G09）。
-
-        只读缓存，不触发上游请求（AC-21）；不写 `daily_reports`，因此**不占用**
-        当天自动日报的唯一发送权，也不改变定时任务状态。
-
-        返回 `(png, payload, render_error_reason)`：
-        - 没有可用预测快照 → `(None, None, None)`（命令层应提示「暂无数据」）；
-        - 渲染失败 → `(None, payload, reason)`，`reason` 取值
-          `font_missing` / `font_error` / `render_error` / `render_timeout`，
-          供命令层给出不同的中文提示（P10 失败分类）。
-        """
-        moment = ensure_utc(now)
-        data = await self.build_report_data(
-            moment, theme=theme, manual=not test, test=test
+        self, *, products: Sequence[str], test: bool = False
+    ) -> tuple[bytes | None, dict[str, Any], str | None]:
+        """只读生成订阅产品简报，不占用当天自动发送名额。"""
+        payload = await self._reset_report_payload(
+            products, theme=self._settings_provider().daily_report_theme, test=test
         )
-        if data is None:
-            return None, None, None
-        payload = data.as_payload()
         try:
             png = await asyncio.wait_for(
-                asyncio.to_thread(render_report_png, data, tz=self._tz_provider()),
+                asyncio.to_thread(render_reset_report_png, payload),
                 timeout=REPORT_RENDER_TIMEOUT_SECONDS,
             )
         except ReportRenderError as exc:
@@ -1100,79 +1054,17 @@ class Pipeline:
             return None, payload, "render_error"
         return png, payload, None
 
-    async def build_report_data(
-        self,
-        now: datetime,
-        *,
-        business_date: str = "",
-        theme: str | None = None,
-        manual: bool = False,
-        test: bool = False,
-    ) -> ReportData | None:
-        """汇总日报所需数据（P03/P04/P05/P11）；没有 forecast 快照时返回 None。"""
-        moment = ensure_utc(now)
-        plugin = self._settings_provider()
+    async def _reset_report_payload(
+        self, products: Sequence[str], *, theme: str, test: bool = False
+    ) -> dict[str, Any]:
         forecast = self.forecast()
-        if forecast is None:
-            return None
-        stale = not self._is_fresh(plugin, moment)
-        last_reset = await self._last_confirmed_reset(forecast)
-        status, window_text = self._watch_status(forecast)
-        resolved_theme = ensure_theme(theme or plugin.daily_report_theme)
-        resolved_date = business_date or self.daily_scheduler().business_date(moment)
-        return ReportData(
-            rounded_24h=int(forecast.rounded_24h),
-            rounded_48h=int(forecast.rounded_48h),
-            confidence=str(forecast.confidence),
-            updated_at=ensure_utc(forecast.updated_at),
-            business_date=resolved_date,
-            last_reset_at=last_reset,
-            watch_status=status,
-            watch_window=window_text,
-            watch_summary=None if forecast.latest_alert is None else forecast.latest_alert.summary,
-            stale=stale,
-            theme=resolved_theme,
-            manual=manual,
-            test=test,
-        )
-
-    async def _last_confirmed_reset(self, forecast: ForecastSnapshot) -> datetime | None:
-        """最近一次**已确认**全球重置（P04）：优先取本地确认事件，缺省用上游水位。
-
-        只查 `group_kind="reset"` 且排除更正行，绝不混入权益补偿时间（P04 红线）。
-        """
-        events = await self._repo.list_events(
-            group_kind="reset", limit=1, exclude_corrections=True
-        )
-        if events:
-            return ensure_utc(events[0].occurred_at)
-        if forecast.last_reset_at is not None:
-            return ensure_utc(forecast.last_reset_at)
-        return None
-
-    def _watch_status(self, forecast: ForecastSnapshot) -> tuple[str, str | None]:
-        """官方预告状态（P05）：`confirmed` / `watch` / `none`，绝不根据概率自行构造。
-
-        只有上游 `latest_alert` 明确给出 watch 窗口时才展示窗口文案；没有可靠窗口
-        时固定输出「暂无明确预计时段」，不预测具体小时数。
-        """
-        alert: LatestAlert | None = forecast.latest_alert
-        if alert is None:
-            return "none", None
-        if alert.kind == "reset" and alert.state == "confirmed" and not alert.corrected:
-            return "confirmed", None
-        if alert.kind == "watch" and alert.state == "active":
-            window = _window_dict(alert.window)
-            text = watch_window_text({"window": window}, self._tz_provider())
-            return "watch", text
-        return "none", None
-
-    @staticmethod
-    def _report_filename(data: ReportData) -> str:
-        """图片文件名（含业务日期，便于群成员辨识）。"""
-        date_part = data.business_date or data.updated_at.strftime("%Y-%m-%d")
-        prefix = "codex-reset-test" if data.test else "codex-reset-forecast"
-        return f"{prefix}-{date_part}.png"
+        return {
+            "resets": await read_reset_summary(
+                self._repo, products, codex_fallback=forecast.last_reset_at if forecast else None
+            ),
+            "theme": ensure_theme(theme),
+            "test": test,
+        }
 
     # ------------------------------------------------------------------
     # 诊断

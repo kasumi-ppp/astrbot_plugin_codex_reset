@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .clock import ensure_utc
 from .errors import SITE_URL
 from .log import logger
+from .reset_summary import RESET_REPORT_TITLE, reset_summary_rows, reset_summary_sources
 
 CANVAS_WIDTH = 900
 CANVAS_HEIGHT = 1200
@@ -493,6 +494,42 @@ def _render(payload: Mapping[str, Any], *, tz: Any, font_path: str | None) -> by
         business_date,
     )
     return buffer
+
+
+def render_reset_report_png(payload: Mapping[str, Any]) -> bytes:
+    """Render one compact row per selected product with the bundled Chinese font."""
+    try:
+        rows = reset_summary_rows(payload["resets"])
+        sources = reset_summary_sources(payload["resets"])
+        colors = theme_colors(payload["theme"])
+        fonts = FontSet()
+        margin, width, row_height = 38, CANVAS_WIDTH, 65
+        top = 119
+        source_lines = (len(sources) + 1) // 2
+        height = top + row_height * len(rows) + 26 + 25 * (1 + source_lines)
+        image = Image.new("RGB", (width, height), colors["bg"])
+        draw = ImageDraw.Draw(image)
+        title = f"{RESET_REPORT_TITLE}（测试）" if payload.get("test") else RESET_REPORT_TITLE
+        draw.text((margin, 25), title, font=fonts.get(38), fill=colors["title"])
+        draw.text((margin, 78), "北京时间", font=fonts.get(22), fill=colors["muted"])
+        for label, state in rows:
+            draw.rounded_rectangle((margin, top, width - margin, top + 53), 12, fill=colors["card"])
+            draw.text((margin + 16, top + 10), label, font=fonts.get(25), fill=colors["title"])
+            state_width, _ = _text_size(draw, state, fonts.get(25))
+            color = colors["accent"] if state.startswith("已重置") else colors["muted"]
+            draw.text((width - margin - 16 - state_width, top + 10), state, font=fonts.get(25), fill=color)
+            top += row_height
+        foot_font = fonts.get(19)
+        draw.text((margin, top + 5), "数据来源", font=foot_font, fill=colors["muted"])
+        for index, source in enumerate(sources):
+            x = margin if index % 2 == 0 else width // 2
+            y = top + 30 + (index // 2) * 25
+            draw.text((x, y), source, font=foot_font, fill=colors["muted"])
+        return _encode(image)
+    except ReportRenderError:
+        raise
+    except Exception as exc:
+        raise ReportRenderError(f"重置简报渲染失败：{exc}", reason="render_error") from exc
 
 
 def _encode(image: Image.Image) -> bytes:

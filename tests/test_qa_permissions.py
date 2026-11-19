@@ -164,7 +164,7 @@ def test_non_admin_still_gets_full_query_after_denial(tmp_path):
         try:
             service = _service(repo)
             denied = await service.handle(_request("subscribe", admin=False))
-            status = await service.handle(_request("status", admin=False))
+            status = await service.handle(_request("status", admin=False, args=("detail",)))
             return denied, status, await repo.list_subscriptions()
 
         finally:
@@ -188,6 +188,7 @@ def test_query_commands_are_available_to_members_with_source_line(tmp_path, comm
     async def scenario():
         repo = await open_repo_or_fail(tmp_path)
         try:
+            await _seed_subscription(repo)
             await repo.record_logical_event(
                 LogicalEvent(
                     logical_id=f"reset:{REAL_RESET_ID}",
@@ -214,14 +215,14 @@ def test_query_commands_are_available_to_members_with_source_line(tmp_path, comm
 
 
 def test_status_reports_monitor_switch_and_freshness(tmp_path):
-    """F05/AC-21：`/cr status` 必须包含监控开关、概率、订阅群数与新鲜度信息。"""
+    """`/cr status detail` 保留监控开关、概率、订阅群数与新鲜度信息。"""
 
     async def scenario():
         repo = await open_repo_or_fail(tmp_path)
         try:
             await _seed_subscription(repo)
             service = _service(repo)
-            return await service.handle(_request("status", admin=False))
+            return await service.handle(_request("status", admin=False, args=("detail",)))
 
         finally:
             await repo.close()

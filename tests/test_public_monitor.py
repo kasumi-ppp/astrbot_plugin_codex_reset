@@ -58,7 +58,7 @@ def test_independent_baselines_and_persisted_403_backoff(tmp_path: Path) -> None
             assert await monitor.poll("grok") == 3600
             clock.advance(3600)
             samples.error = None
-            assert await monitor.poll("grok") == 300
+            assert await monitor.poll("grok") == 60
             assert (await repo.public_product_status("grok-bot"))["baseline"]
             assert (await repo.public_product_status("grok-bot"))["error"] is None
             assert not (await repo.public_product_status("grok-build"))["baseline"]
@@ -227,6 +227,164 @@ def test_agy_pagination_failure_and_304_preserve_every_page(monkeypatch) -> None
             assert {event.event_id for event in await client.fetch("agy")} == {"1", "2"}
             assert {event.event_id for event in await client.fetch("agy")} == {"1", "2"}
             assert second_page_calls == 3
+        finally:
+            await runner.cleanup()
+
+    run(scenario())
+
+
+def test_public_signals_use_subscription_queue_and_expire(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        config = PluginSettings(enable_antigravity_gemini=True, enable_grok_build=True, enable_gemini=True)
+        reset = None
+        watch = None
+        grok = []
+        notified = []
+
+        async def handler(request):
+            if request.path == "/status":
+                return web.json_response({
+                    "data": {"scheduled_reset": None, "active_watch": watch, "latest_reset": reset}
+                })
+            if request.path == "/resets":
+                return web.json_response({
+                    "data": [reset] if reset else [], "pagination": {"has_more": False}
+                })
+            return web.json_response({"data": grok})
+
+        async def send(umo, text, _at_all):
+            notified.append((umo, text))
+            return True
+
+        app = web.Application()
+        app.router.add_get("/{kind}", handler)
+        runner, url = await _server(app)
+        try:
+            monkeypatch.setitem(SOURCE_ENDPOINTS, "agy", (url + "/resets", url + "/status"))
+            monkeypatch.setitem(SOURCE_ENDPOINTS, "grok", (url + "/grok",))
+            async with _open(tmp_path, clock) as repo:
+                await _choose(repo, "1", "antigravity-gemini")
+                await _choose(repo, "2", "grok-build")
+                await _choose(repo, "3", "gemini")
+                await _choose(repo, "4", "codex")
+                await _choose(repo, "5", "antigravity-gemini")
+                await repo.update_subscription_override(
+                    "aiocqhttp:GroupMessage:5", GroupOverride(enable_watch=False)
+                )
+                monitor = PublicMonitor(repo, PublicSourceClient(), clock, lambda: config)
+                worker = DeliveryWorker(
+                    repo=repo, clock=clock, send=send, settings_provider=lambda: config,
+                    tz_provider=lambda: ZoneInfo("Asia/Shanghai"),
+                )
+                await monitor.poll("agy")
+                await monitor.poll("grok")
+                clock.advance(60)
+                stamp = clock.utcnow().isoformat()
+                watch = {
+                    "level": "strong", "observed_at": stamp,
+                    "expires_at": (clock.utcnow() + timedelta(minutes=2)).isoformat(),
+                    "text": "Possible Antigravity reset",
+                    "source": {"url": "https://x.com/antigravity/status/1"},
+                }
+                grok.extend([{
+                    "slug": "public", "provider": "xai", "state": "likely", "type": "hard_reset",
+                    "announcedAt": stamp, "products": ["Grok"], "cohort": "Global",
+                    "source": {"url": "https://x.com/grok/status/2", "excerpt": "Looking into quota relief."},
+                }, {
+                    "slug": "gemini", "provider": "gemini", "state": "likely", "type": "hard_reset",
+                    "announcedAt": stamp, "products": ["Gemini"], "cohort": "all paid users",
+                    "source": {"url": "https://blog.google/example/reset/"},
+                }])
+                grok.append(dict(grok[0], slug="personal", cohort="Your Grok Bot", products=["Grok Bot"]))
+                await monitor.poll("agy")
+                await monitor.poll("grok")
+                assert await worker.run_once(clock.utcnow()) == 3
+                assert {target[-1] for target, _ in notified} == {"1", "2", "3"}
+                assert all("可能重置" in text and "尚未确认" in text for _, text in notified)
+                await monitor.poll("agy")
+                await monitor.poll("grok")
+                assert await worker.run_once(clock.utcnow()) == 0
+                clock.advance(60)
+                watch = {
+                    **watch, "observed_at": clock.utcnow().isoformat(),
+                    "source": {"url": "https://x.com/antigravity/status/9"},
+                }
+                await monitor.poll("agy")
+                assert await repo.count_deliveries("pending") == 1
+                clock.advance(60)
+                assert await worker.run_once(clock.utcnow()) == 0
+                reset = {
+                    "id": "10", "announced_at": clock.utcnow().isoformat(), "models": ["all"],
+                    "source": {"url": "https://x.com/antigravity/status/10"},
+                }
+                grok[0].update(state="confirmed", confirmedAt=clock.utcnow().isoformat())
+                await monitor.poll("agy")
+                await monitor.poll("grok")
+                assert await worker.run_once(clock.utcnow()) == 3
+                assert all("已重置" in text for _, text in notified[-3:])
+        finally:
+            await runner.cleanup()
+
+    run(scenario())
+
+
+def test_claude_forecast_isolated_and_alerts_once_per_cycle(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        config = PluginSettings(enable_claude=True)
+        probability = 20
+        forecast_down = False
+        reset_at = clock.utcnow() - timedelta(days=1)
+        cycle = "20"
+
+        async def handler(request):
+            if request.path == "/forecast":
+                if forecast_down:
+                    return web.Response(status=403)
+                return web.json_response({
+                    "available": True, "p24": probability, "p48": 35, "fetched_at": clock.utcnow().isoformat()
+                })
+            return web.json_response({"events": [{
+                "id": cycle, "ts": reset_at.isoformat(), "origin": "official_post",
+                "url": f"https://x.com/ClaudeDevs/status/{cycle}",
+                "summary": "We have reset usage for all users.",
+            }]})
+
+        app = web.Application()
+        app.router.add_get("/{kind}", handler)
+        runner, url = await _server(app)
+        try:
+            monkeypatch.setitem(SOURCE_ENDPOINTS, "claude", (url + "/timeline", url + "/forecast"))
+            client = PublicSourceClient()
+            async with _open(tmp_path, clock) as repo:
+                await _choose(repo, "1", "claude")
+                await _choose(repo, "2", "claude")
+                await repo.update_subscription_override(
+                    "aiocqhttp:GroupMessage:2", GroupOverride(threshold_24h=80)
+                )
+                monitor = PublicMonitor(repo, client, clock, lambda: config)
+                await monitor.poll("claude")
+                assert await repo.count_deliveries() == 0
+                clock.advance(300)
+                probability = 61
+                await monitor.poll("claude")
+                tasks = await repo.claim_pending_deliveries(clock.utcnow())
+                assert [(t.umo[-1], t.state_version, t.payload["probabilities"]) for t in tasks] == [
+                    ("1", "forecast", [61, 35])
+                ]
+                clock.advance(300)
+                probability = 83
+                await monitor.poll("claude")
+                tasks = await repo.claim_pending_deliveries(clock.utcnow())
+                assert [(t.umo[-1], t.state_version) for t in tasks] == [("2", "forecast")]
+                clock.advance(300)
+                forecast_down = True
+                reset_at = clock.utcnow()
+                cycle = "21"
+                await monitor.poll("claude")
+                assert await repo.count_deliveries("pending") == 2
+                assert (await repo.public_product_status("claude"))["latest"].state_version == "reset"
         finally:
             await runner.cleanup()
 

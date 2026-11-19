@@ -41,10 +41,10 @@ from .notifications import (
     confidence_cn,
     format_day,
     format_time,
-    render_daily_report_text,
     render_test,
 )
 from .public_messages import PRODUCT_LABELS, PUBLIC_STATE_LABELS, product_enabled, render_public
+from .reset_summary import NO_SUBSCRIPTION_TEXT, read_reset_summary, render_reset_summary_text
 
 #: `(umo, 子命令)` 维度的限频秒数（PRD §4 冻结）
 RATE_LIMITS: dict[str, int] = {
@@ -84,10 +84,8 @@ SET_USAGE = (
     "用法：/cr set reset|watch|forecast|credits|daily on|off；/cr set p24|p48 0-100 的整数"
 )
 HISTORY_USAGE = "用法：/cr history [1-10]（默认 3 条，最多 10 条）"
-REPORT_USAGE = "用法：/cr report（在群内手动生成当前概率预测图片）"
-TEST_USAGE = "用法：/cr test [image]（默认文本；image 为预测图片发送测试）"
-REPORT_NO_DATA_TEXT = "暂无数据：还没有可用的预测快照，无法生成图片，请稍后再试。"
-REPORT_NOT_GROUP_TEXT = "请在群聊中执行 /cr report（预测图片面向群发送）。"
+TEST_USAGE = "用法：/cr test <产品> [watch] 或 /cr test image"
+REPORT_NOT_GROUP_TEXT = "请在群聊中执行 /cr report。"
 
 #: `manual_report_png` 渲染失败分类 → 中文提示（P10；与「图片发送失败」分层，互不叠加）
 RENDER_FAILURE_HEAD: dict[str, str] = {
@@ -117,7 +115,7 @@ FIELD_LABELS: dict[str, str] = {
     "enable_watch": "提前预告",
     "enable_forecast": "概率预测",
     "enable_credits": "额外权益",
-    "enable_daily_report": "每日预测图片",
+    "enable_daily_report": "每日重置简报",
     "threshold_24h": "24h 阈值",
     "threshold_48h": "48h 阈值",
 }
@@ -148,7 +146,8 @@ HELP_TEXT = "\n".join(
         "📖【AI 额度雷达 · 指令说明】",
         "",
         "查询（群成员）：",
-        "/cr 或 /cr status  监控状态、最近重置、预告状态与数据新鲜度",
+        "/cr 或 /cr status  本群订阅产品最近确认重置",
+        "/cr status detail  查看采集和投递诊断",
         "/cr forecast      24h/48h 重置概率详情",
         "/cr latest        最近一次已确认重置",
         "/cr credits       最近额外重置权益动态",
@@ -158,17 +157,17 @@ HELP_TEXT = "\n".join(
         "管理（AstrBot 管理员）：",
         "/cr subscribe [产品]  订阅该产品（省略时订阅 Codex）",
         "/cr unsubscribe [产品]  退订该产品（省略时整群退订）",
-        "产品：codex、claude、grok-bot、grok-build、antigravity-gemini",
-        "/cr test <产品>  发送测试消息",
+        "产品：codex、claude、grok-bot、grok-build、antigravity-gemini、gemini",
+        "/cr test <产品> [watch]  测试确认或预警消息",
         "/cr settings      查看本群生效配置与来源",
         "/cr set <项> <值> 修改本群配置（reset/watch/forecast/credits/daily on|off；p24/p48 0-100）",
-        "/cr report        手动生成当前概率预测图片（不影响每日自动日报）",
+        "/cr report        查看本群的重置简报图片",
         "/cr groups        私聊查看订阅群与推送健康",
-        "/cr test [image]  发送测试消息（image 为预测图片测试；不入库、不建立投递）",
+        "/cr test [image]  发送测试消息（image 为重置简报测试）",
         "",
         "备用指令：/codexreset 与 /cr 完全等价（当 /cr 被其他插件占用时使用）。",
         "权限模型：管理指令要求 AstrBot 管理员（event.is_admin）；订阅必须来自真实群会话。",
-        "每日预测图片（定时）：需「全局开关 enable_daily_report」与「本群开关」同时开启才生效。",
+        "每日重置简报：全局和本群的日报开关同时开启才会定时发送。",
         "本群开关：管理员在群内执行 /cr set daily on 开启（命令须带 /，默认关闭）。",
         "手动生成不受定时开关限制：/cr report 与 /cr test image 始终可用。",
         "数据来自第三方站点 codex-reset.com，非官方接口，请自行判断风险。",
@@ -177,19 +176,11 @@ HELP_TEXT = "\n".join(
 
 
 class DailyReportProvider(Protocol):
-    """`/cr report` 与 `/cr test image` 的图片协作方（`Pipeline` 实现）。
-
-    命令层只消费 `(png, payload, render_error_reason)`，不感知渲染细节：
-    - `png is None and payload is None` → 没有可用预测快照（提示「暂无数据」）；
-    - `png is None and payload is not None` → 渲染失败，`render_error_reason` 给出
-      `font_missing` / `font_error` / `render_timeout` / `render_error` 之一；
-    - `png is not None` → 渲染成功，`render_error_reason` 为 `None`。
-    """
+    """Generate an image and its text fallback from the same snapshot."""
 
     async def manual_report_png(
-        self, *, now: datetime, test: bool = False, theme: str | None = None
-    ) -> tuple[bytes | None, dict[str, Any] | None, str | None]:
-        """手动渲染预测图片；失败或无数据返回 `(None, ..., ...)`。"""
+        self, *, products: tuple[str, ...], test: bool = False
+    ) -> tuple[bytes | None, dict[str, Any], str | None]:
         ...
 
 
@@ -282,6 +273,17 @@ class CommandService:
 
         tz = self._tz_provider()
         if sub == "status":
+            if not req.args:
+                products = await self._summary_products(req)
+                if not products:
+                    return CommandReply(text=NO_SUBSCRIPTION_TEXT)
+                forecast = self._read.forecast()
+                rows = await read_reset_summary(
+                    self._repo, products, codex_fallback=forecast.last_reset_at if forecast else None
+                )
+                return CommandReply(text=render_reset_summary_text(rows))
+            if tuple(arg.lower() for arg in req.args) != ("detail",):
+                return CommandReply(text="用法：/cr status [detail]", error="bad_args")
             text = await self._render_status(plugin, now, tz, req)
         elif sub == "forecast":
             text = self._render_forecast(now, tz)
@@ -304,7 +306,7 @@ class CommandService:
         elif sub == "groups":
             text = await self._groups(req, plugin, tz)
         elif sub == "report":
-            return await self._report(req, plugin, tz)
+            return await self._report(req)
         elif sub == "test":
             return await self._test(req, plugin, tz)
         else:  # 理论不可达：`RATE_LIMITS` 与上方分支一一对应
@@ -333,6 +335,12 @@ class CommandService:
     # ------------------------------------------------------------------
     # 查询（只读缓存）
     # ------------------------------------------------------------------
+    async def _summary_products(self, req: CommandRequest) -> tuple[str, ...]:
+        if not req.is_group:
+            return tuple(PRODUCT_LABELS)
+        sub = await self._repo.get_subscription(req.umo)
+        return sub.products if sub is not None and sub.enabled else ()
+
     async def _render_status(
         self, plugin: PluginSettings, now: datetime, tz: ZoneInfo, req: CommandRequest
     ) -> str:
@@ -487,7 +495,7 @@ class CommandService:
         return f"图片环境：{status_text}"
 
     async def _daily_report_switch_line(self, plugin: PluginSettings, req: CommandRequest) -> str:
-        """`/cr status` 的「每日预测图片」双层开关行（全局 AND 群级，改动 3b）。"""
+        """详细状态中的日报开关。"""
         global_text = "开启" if plugin.enable_daily_report else "关闭"
         if not req.is_group or not req.group_id:
             group_text = "—（非群会话）"
@@ -507,7 +515,7 @@ class CommandService:
                     settings = resolve_group_settings(plugin, row.override)
                     group_text = "开启" if settings.enable_daily_report else "关闭"
         return (
-            f"每日预测图片：全局 {global_text} ｜ 本群 {group_text}"
+            f"每日重置简报：全局 {global_text} ｜ 本群 {group_text}"
             f"（定时图片需两者同时开启，手动 /cr report 不受限）"
         )
 
@@ -806,48 +814,42 @@ class CommandService:
     # ------------------------------------------------------------------
     # 图片命令（P09 / G09）
     # ------------------------------------------------------------------
-    async def _report(
-        self, req: CommandRequest, plugin: PluginSettings, tz: ZoneInfo
-    ) -> CommandReply:
-        """`/cr report`：手动生成当前概率预测图片（P09）。
-
-        - 只读缓存，不触发上游请求，不绕开限流（AC-21）；
-        - 不写 `daily_reports`，因此**不占用**当天自动日报的唯一发送权；
-        - 不改变定时任务的发送状态。
-        """
+    async def _report(self, req: CommandRequest, *, test: bool = False) -> CommandReply:
+        """Render the group report or a marked test image."""
         if self._daily is None:
             return CommandReply(
-                text=self._finalize("图片功能不可用：当前实例未启用预测图片渲染。"),
+                text="图片功能不可用。",
                 error="report_unavailable",
             )
         if not req.is_group or not req.group_id:
-            return CommandReply(text=self._finalize(REPORT_NOT_GROUP_TEXT), error="not_group")
-        await self._audit(req, "report", "ok")
-        png, payload, render_error = await self._daily.manual_report_png(
-            now=self._clock.utcnow(), test=False
-        )
+            command = "请在群聊中执行 /cr test image。" if test else REPORT_NOT_GROUP_TEXT
+            return CommandReply(text=command, error="not_group")
+        products = await self._summary_products(req)
+        if not products:
+            return CommandReply(text=NO_SUBSCRIPTION_TEXT, error="not_subscribed")
+        await self._audit(req, "test:image" if test else "report", "ok")
+        png, payload, render_error = await self._daily.manual_report_png(products=products, test=test)
+        summary = render_reset_summary_text(payload["resets"], test=test)
         if png is None:
-            if payload is None:
-                return CommandReply(text=self._finalize(REPORT_NO_DATA_TEXT), error="no_data")
-            text = self._render_failure_text(
-                render_error, payload, tz=tz, settings=plugin, test=False
-            )
-            return CommandReply(text=text, error="render_failed")
-        text = render_daily_report_text(payload or {}, tz=tz, settings=plugin)
-        return CommandReply(text=self._finalize(text), image=png)
+            reason = RENDER_FAILURE_HEAD.get(render_error or "", RENDER_FAILURE_HEAD["render_error"])
+            return CommandReply(text=f"{reason}\n{summary}", error="render_failed")
+        return CommandReply(text=summary, image=png, image_name="ai-quota-resets.png")
 
     async def _test(self, req: CommandRequest, plugin: PluginSettings, tz: ZoneInfo) -> CommandReply:
-        """`/cr test [image]`（G09）：`image` 为预测图片发送测试，仍标注「测试」。
+        """`/cr test [image]`（G09）：`image` 为重置简报发送测试，仍标注「测试」。
 
         测试消息**不入库、不建立投递**，也不影响真实事件与日报的去重状态。
         """
         args = [arg.strip().lower() for arg in req.args if arg.strip()]
-        if len(args) == 1 and args[0] in PRODUCT_LABELS:
+        if args and args[0] in PRODUCT_LABELS and (len(args) == 1 or args[1:] == ["watch"]):
             if not req.is_group or not req.group_id or req.platform != "aiocqhttp":
                 return CommandReply(text="请在目标 QQ 群执行产品测试。", error="not_group")
             product = args[0]
+            state = "watch" if len(args) == 2 else "reset"
+            if product == "codex" and state == "watch":
+                return CommandReply(text="Codex 请使用 /cr test codex。", error="bad_args")
             text = render_test(tz=tz, settings=plugin) if product == "codex" else render_public(
-                {"product": product, "state": "reset", "occurred_at": self._clock.utcnow().isoformat(),
+                {"product": product, "state": state, "occurred_at": self._clock.utcnow().isoformat(),
                  "scope": "当前测试群", "summary": "模拟额度事件，仅用于验证发送通道。"},
                 test=True,
             )
@@ -866,60 +868,11 @@ class CommandService:
             return CommandReply(text=self._finalize(TEST_USAGE), error="bad_args")
         if not args:
             return CommandReply(text=render_test(tz=tz, settings=plugin))
-        if self._daily is None:
-            return CommandReply(
-                text=self._finalize("图片功能不可用：当前实例未启用预测图片渲染。"),
-                error="report_unavailable",
-            )
-        if not req.is_group or not req.group_id:
-            return CommandReply(
-                text=self._finalize("请在群聊中执行 /cr test image。"), error="not_group"
-            )
-        await self._audit(req, "test:image", "ok")
-        png, payload, render_error = await self._daily.manual_report_png(
-            now=self._clock.utcnow(), test=True
-        )
-        if png is None:
-            if payload is None:
-                return CommandReply(text=self._finalize(REPORT_NO_DATA_TEXT), error="no_data")
-            text = self._render_failure_text(
-                render_error, payload, tz=tz, settings=plugin, test=True
-            )
-            return CommandReply(text=text, error="render_failed")
-        text = render_daily_report_text({**payload, "test": True}, tz=tz, settings=plugin)
-        return CommandReply(text=self._finalize(text), image=png)
+        return await self._report(req, test=True)
 
     # ------------------------------------------------------------------
     # 审批 / 审计 / 渲染辅助
     # ------------------------------------------------------------------
-    def _render_failure_text(
-        self,
-        reason: str | None,
-        payload: dict[str, Any],
-        *,
-        tz: ZoneInfo,
-        settings: PluginSettings,
-        test: bool,
-    ) -> str:
-        """渲染失败时构造「生成失败」中文降级文本（**不含**「图片发送失败」措辞）。
-
-        发送失败是 `main.py` 层（`_send_image` 返回 False）的降级语义，命令层只负责
-        「生成」这一环，二者分层、互不叠加（P10）。
-        """
-        from .report_renderer import render_report_text_lines  # 局部导入避免同层循环
-
-        head = RENDER_FAILURE_HEAD.get(reason or "render_error", RENDER_FAILURE_HEAD["render_error"])
-        prefix = "🧪【测试消息】" if test else ""
-        body = "\n".join(
-            [
-                f"{prefix}{head}",
-                "",
-                *render_report_text_lines(payload, tz=tz),
-                "⚠️ 这是独立站点实验性预测，不代表官方承诺。",
-            ]
-        )
-        return self._finalize(body)
-
     async def _audit(
         self,
         req: CommandRequest,
@@ -976,13 +929,13 @@ class CommandService:
 
     @classmethod
     def _daily_report_switch_summary(cls, plugin: PluginSettings, row: SubscriptionRow) -> str:
-        """`/cr settings` 的「每日预测图片」双层开关摘要（改动 3b）。"""
+        """`/cr settings` 的日报开关。"""
         settings = resolve_group_settings(plugin, row.override)
         global_text = "开启" if plugin.enable_daily_report else "关闭"
         group_text = "开启" if settings.enable_daily_report else "关闭"
         source = cls._source_of(row, "enable_daily_report")
         return (
-            f"每日预测图片：全局 {global_text} ｜ 本群 {group_text}（{source}）\n"
+            f"每日重置简报：全局 {global_text} ｜ 本群 {group_text}（{source}）\n"
             "说明：定时图片需全局开关与本群开关同时开启；手动 /cr report 与 /cr test image 不受限。"
         )
 

@@ -94,10 +94,10 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.6.2"
+PLUGIN_VERSION = "1.7.0"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
-PLUGIN_DESC = "向订阅群推送 Codex、Claude、Grok 和 Antigravity Gemini 公开额度事件"
+PLUGIN_DESC = "向订阅群推送 Codex、Claude、Grok 和 Gemini 的公开额度预警、确认与日报"
 
 DB_FILENAME = "codex_reset.db"
 AUDIT_DIRNAME = "audit"
@@ -413,7 +413,7 @@ class CodexResetRadar(Star):
             self._tasks.append(
                 asyncio.create_task(self._delivery_loop(), name="codex-reset-delivery")
             )
-            # 每日预测图片调度（P01）：与实时监控、投递队列相互独立
+            # 每日重置简报调度：与实时监控、投递队列相互独立
             self._tasks.append(
                 asyncio.create_task(self._daily_report_loop(), name="codex-reset-daily-report")
             )
@@ -523,7 +523,7 @@ class CodexResetRadar(Star):
             logger.error("[codex-reset][main] 投递循环异常退出", exc_info=True)
 
     async def _daily_report_loop(self) -> None:
-        """每日预测图片循环（P01 / G08）：30s 一拍，异常一律捕获，绝不冒泡。"""
+        """每日重置简报循环：30s 一拍，捕获处理中的异常。"""
         if self._pipeline is None:  # pragma: no cover - initialize 保证非空
             return
         while not self._stopping:
@@ -765,7 +765,7 @@ class CodexResetRadar(Star):
             return False
 
     async def _send_image(self, umo: str, png: bytes, filename: str) -> bool:
-        """把 PNG 送到指定会话（每日预测图片 / `/cr report` / `/cr test image`）。
+        """把 PNG 送到指定会话（每日重置简报 / `/cr report` / `/cr test image`）。
 
         返回值语义与 `SendFn` 一致：True=平台已接受；False=明确失败（可降级文本）；
         `TimeoutError` 原样抛出（结果不确定，调用方不得补发文本，P10）。

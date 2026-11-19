@@ -3,13 +3,19 @@
 本文件记录 AI 额度雷达（原 Codex 重置雷达）的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 `vMAJOR.MINOR.PATCH`。
 
+## [Unreleased]
+
+## [v1.7.0] - 2026-11-19
+
+- 接入 Antigravity 规则预警、Grok 公开重置信号与 Claude 概率提醒，分别标记「可能重置」「已预告」「已重置」，按本群订阅推送并去重。
+- 新增独立的 Google Gemini 订阅 `gemini`，默认关闭，与 `antigravity-gemini` 分开。
+- `/cr status`、手动与定时日报只展示本群订阅产品的最近确认重置。完整诊断入口为 `/cr status detail`。
+
 ## [v1.6.2] - 2026-11-17
 
 ### 修复
 
 - 修复 `/cr subscribe <产品>` 等群订阅操作投影到 WebUI `group_overrides` 时缺少 `__template_key`，导致 AstrBot 插件配置格式校验失败的问题。重载插件会从现有订阅记录重建配置卡片，无需删除或重建群订阅。
-
-## [Unreleased]
 
 ## [v1.6.1] - 2026-11-17
 
@@ -160,7 +166,8 @@
 - 只读判定是**一次性**的：若持锁实例在只读实例启动后才崩溃，只读实例不会自愈，需要再重启一次（不会产生两个写者）。
 - 仅支持 `aiocqhttp` 平台的 `@全体成员`，其他平台静默省略。
 
-[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.6.2...HEAD
+[Unreleased]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.7.0...HEAD
+[v1.7.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/d876b20...v1.7.0
 [v1.6.2]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.6.1...v1.6.2
 [v1.6.1]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.6.0...v1.6.1
 [v1.5.0]: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset/compare/v1.4.0...v1.5.0

@@ -284,6 +284,7 @@ def build_plugin_settings(raw: Mapping[str, object] | None) -> PluginSettings:
         enable_grok_bot=_coerce_bool(data, "enable_grok_bot", False, warnings),
         enable_grok_build=_coerce_bool(data, "enable_grok_build", False, warnings),
         enable_antigravity_gemini=_coerce_bool(data, "enable_antigravity_gemini", False, warnings),
+        enable_gemini=_coerce_bool(data, "enable_gemini", False, warnings),
         warnings=tuple(warnings),
     )
     for warning in warnings:

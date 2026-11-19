@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -14,24 +14,27 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from .log import logger
+
 PRODUCTS = {
     "claude": "Claude",
     "grok-bot": "Grok Bot",
     "grok-build": "Grok Build",
     "antigravity-gemini": "Antigravity Gemini",
+    "gemini": "Google Gemini",
 }
 SOURCES = {
     "claude": ("claude",),
-    "grok": ("grok-bot", "grok-build"),
+    "grok": ("grok-bot", "grok-build", "gemini"),
     "agy": ("antigravity-gemini",),
 }
 SOURCE_ENDPOINTS = {
-    "claude": ("https://claudereset.org/api/v1/timeline.json",),
+    "claude": ("https://claudereset.org/api/v1/timeline.json", "https://claudereset.org/api/v1/forecast.json"),
     "grok": ("https://quotaresets.com/api/v1/events.json",),
     "agy": ("https://www.agyresets.com/api/v1/resets", "https://www.agyresets.com/api/v1/status"),
 }
 _MAX_BYTES = 1_000_000
-_UA = "AstrBot Codex Reset Radar/1.6.2 (+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)"
+_UA = "AstrBot Codex Reset Radar/1.7.0 (+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +47,7 @@ class PublicEvent:
     source_url: str
     summary: str
     expires_at: datetime | None = None
+    probabilities: tuple[int, int] | None = None
 
 
 class SourceError(Exception):
@@ -97,10 +101,27 @@ _DONE = re.compile(
     r"(?:limits|quota|usage) (?:were|was|are now|have been) reset)\b", re.I,
 )
 _COHORT = re.compile(
-    r"\b(?:all|everyone|subscribers|paid plans?|affected users|eligible users|"
+    r"\b(?:all|everyone|global|subscribers|paid plans?|affected users|eligible users|"
+    r"(?:grok(?: bot| build)?|gemini|free|paid|pro|premium) users|"
     r"users (?:in|on|with)|plans?|accounts|cursor pro|supergrok|customers|members)\b", re.I,
 )
 _PERSONAL = re.compile(r"^(?:your|you|single|individual|one user|unknown|scope not stated)\b", re.I)
+_POSSIBLE_RESET = re.compile(
+    r"\b(?:may|might|consider(?:ing)?|look(?:ing)? into|ask(?:ing)?|hope to)\b[^.!?\n]{0,85}\breset\b", re.I,
+)
+_GEMINI = re.compile(r"\bgemini\b", re.I)
+
+
+def _google_announcement(value: Any) -> str:
+    if not isinstance(value, str) or any(char.isspace() for char in value):
+        return ""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return ""
+    if parts.scheme == "https" and parts.netloc.lower() == "blog.google" and parts.path.strip("/"):
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return _permalink(value)
 
 
 def _permalink(value: Any, authors: set[str] | None = None) -> str:
@@ -162,6 +183,9 @@ def _normalize(source: str, row: dict[str, Any], *, scheduled: bool = False) -> 
             state = "claimable"
         elif _DONE.search(evidence):
             state = "reset"
+        elif _POSSIBLE_RESET.search(evidence):
+            if _COHORT.search(evidence) or row.get("global") is True:
+                state = "watch"
         elif _PROMISE.search(evidence):
             state = "announced"
         products = ("claude",)
@@ -173,15 +197,25 @@ def _normalize(source: str, row: dict[str, Any], *, scheduled: bool = False) -> 
             scope = " / ".join(dict.fromkeys(plan.title() for plan in plans))
     elif source == "grok":
         when = _date(row.get("announcedAt"))
-        url = _permalink(details.get("url"))
         event_id = _text(row, "resetId", "slug")
         raw_products = row.get("products")
+        labels = {value.strip().lower() for value in raw_products if isinstance(value, str)} if isinstance(
+            raw_products, list
+        ) else set()
+        provider = _text(row, "provider")
+        url = _permalink(details.get("url"))
         products = tuple(
-            key for key, label in (("grok-bot", "grok bot"), ("grok-build", "grok build"))
-            if isinstance(raw_products, list)
-            and any(isinstance(value, str) and value.strip().lower() == label for value in raw_products)
+            key for key, supported in (
+                ("grok-bot", {"grok bot"}), ("grok-build", {"grok build"}),
+            ) if labels & supported
         )
+        if provider == "xai" and "grok" in labels and "grok-build" not in products:
+            products += ("grok-build",)  # QuotaResets groups Grok and Build in one usage pool.
         kind = _text(row, "type")
+        if provider == "gemini" and "gemini" in labels:
+            # Gemini's other public events include trial/access grants, separate from quota resets.
+            products = ("gemini",) if kind in {"hard_reset", "banked_reset"} else ()
+            url = _google_announcement(details.get("url"))
         reported_state = _text(row, "state")
         if reported_state == "retracted":
             state = "retracted"
@@ -192,8 +226,11 @@ def _normalize(source: str, row: dict[str, Any], *, scheduled: bool = False) -> 
                 state = "claimable"
             elif reported_state in {"likely", "announced"} and kind in {
                 "hard_reset", "banked_reset", "usage_credit",
-            } and _PROMISE.search(evidence):
-                state = "announced"
+            }:
+                explicit = _PROMISE.search(evidence) and not _POSSIBLE_RESET.search(evidence)
+                state = "announced" if explicit else "watch"
+            if state in {"reset", "claimable"}:
+                when = _date(row.get("confirmedAt")) or when
     else:
         when = _date(row.get("announced_at"))
         url = _permalink(details.get("url"))
@@ -216,10 +253,12 @@ def _normalize(source: str, row: dict[str, Any], *, scheduled: bool = False) -> 
             if promise is not None:
                 event_id = _text(promise, "id") or event_id
         models = row.get("models")
-        if isinstance(models, list):
-            covers_gemini = any(str(model).lower() in {"gemini", "all"} for model in models)
-        else:
-            covers_gemini = scheduled and bool(re.search(r"\bgemini\b", summary, re.I))
+        tags = {str(model).strip().lower() for model in models} if isinstance(models, list) else set()
+        covers_gemini = bool(tags & {"gemini", "all"}) or (
+            tags <= {"unspecified"} and bool(_GEMINI.search(evidence))
+        )
+        if scheduled and not tags:
+            covers_gemini |= bool(re.search(r"\ball models\b", evidence, re.I))
         products = ("antigravity-gemini",) if covers_gemini else ()
         plans = row.get("plans")
         if isinstance(plans, list):
@@ -227,12 +266,15 @@ def _normalize(source: str, row: dict[str, Any], *, scheduled: bool = False) -> 
         if _text(row, "status", "state") in {"retracted", "withdrawn", "cancelled"}:
             state = "retracted"
         elif scheduled:
-            state = "announced" if _PROMISE.search(evidence) else "observed"
+            explicit = row.get("status") == "scheduled" or _PROMISE.search(evidence)
+            state = "announced" if explicit else "observed"
         else:
             state = "reset"
     if when is None or not event_id or not url:
         return []
     expiry = _date(row.get("expires_at") or row.get("expiresAt") or row.get("valid_until"))
+    if state == "watch" and expiry is None:
+        expiry = when + timedelta(hours=24)
     if expiry is None and state == "claimable":
         # Relative phrases are not converted into an assumed deadline.
         match = re.search(r"\b\d{4}-\d{2}-\d{2}T[0-9:+.Z-]+", evidence)
@@ -246,6 +288,39 @@ def _normalize(source: str, row: dict[str, Any], *, scheduled: bool = False) -> 
     ]
 
 
+def _agy_watch(row: Any) -> list[PublicEvent]:
+    if not isinstance(row, dict) or row.get("level") not in {"elevated", "strong"}:
+        return []
+    source = row.get("source")
+    url = _permalink(source.get("url")) if isinstance(source, dict) else ""
+    when = _date(row.get("observed_at"))
+    expiry = _date(row.get("expires_at"))
+    if not url or when is None or expiry is None or expiry <= when:
+        return []
+    summary = _text(row, "text", "rule")
+    return [PublicEvent(
+        "antigravity-gemini", url.rsplit("/", 1)[-1], "watch", when, "范围待确认", url, summary, expiry
+    )]
+
+
+def _claude_forecast(payload: Any, timeline: list[PublicEvent]) -> list[PublicEvent]:
+    if not isinstance(payload, dict) or payload.get("available") is not True:
+        return []
+    cycle = max((e for e in timeline if e.state in {"reset", "claimable"}),
+                key=lambda event: event.occurred_at, default=None)
+    fetched = _date(payload.get("fetched_at"))
+    probabilities = payload.get("p24"), payload.get("p48")
+    if cycle is None or fetched is None or fetched < cycle.occurred_at:
+        return []
+    if any(type(p) is not int or not 0 <= p <= 100 for p in probabilities):
+        return []
+    return [PublicEvent(
+        "claude", f"forecast:{cycle.event_id}", "forecast", fetched, "范围待确认",
+        "https://claudereset.org/api/v1/forecast.json", "WhenReset 第三方估算",
+        fetched + timedelta(minutes=15), probabilities,
+    )]
+
+
 class PublicSourceClient:
     """Bounded async JSON client with ETag snapshots committed only after valid parsing."""
 
@@ -257,6 +332,7 @@ class PublicSourceClient:
         self._ua = user_agent
         self._etag: dict[str, str] = {}
         self._snapshot: dict[str, Any] = {}
+        self._forecast_retry_at: datetime | None = None
 
     async def _get_json(self, url: str) -> Any:
         headers = {"User-Agent": self._ua, "Accept": "application/json", "Accept-Encoding": "identity"}
@@ -312,6 +388,23 @@ class PublicSourceClient:
         pending: dict[str, tuple[str | None, Any]] = {}
         used_urls: set[str] = set()
         for index, root in enumerate(roots):
+            if source == "claude" and index == 1:
+                now = datetime.now(UTC)
+                if self._forecast_retry_at is not None and now < self._forecast_retry_at:
+                    continue
+                used_urls.add(root)
+                try:
+                    payload, not_modified, etag = await self._get_json(root)
+                except SourceError as exc:
+                    # A forecast outage must not block confirmed Claude announcements.
+                    self._forecast_retry_at = now + timedelta(seconds=max(300, exc.retry_after or 0))
+                    logger.warning("[codex-reset][public] optional Claude forecast error=%s", exc.code)
+                else:
+                    self._forecast_retry_at = None
+                    if not not_modified:
+                        pending[root] = etag, payload
+                    combined.extend(_claude_forecast(payload, combined))
+                continue
             cursor: str | None = None
             seen: set[str] = set()
             for _page in range(20):
@@ -329,6 +422,12 @@ class PublicSourceClient:
                         if not isinstance(scheduled, dict):
                             raise SourceError("invalid_json_shape")
                         combined.extend(_normalize(source, scheduled, scheduled=True))
+                    latest = data.get("latest_reset")
+                    reset_at = _date(latest.get("announced_at")) if isinstance(latest, dict) else None
+                    combined.extend(
+                        event for event in _agy_watch(data.get("active_watch"))
+                        if reset_at is None or event.occurred_at > reset_at
+                    )
                     break
                 rows = _rows(payload, "events" if source == "claude" else "data")
                 id_fields = ("resetId", "slug") if source == "grok" else ("id",)

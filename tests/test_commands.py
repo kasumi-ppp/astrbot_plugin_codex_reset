@@ -30,7 +30,6 @@ from services.commands import (
     GROUP_ONLY_TEXT,
     GROUPS_PRIVATE_TEXT,
     HISTORY_USAGE,
-    REPORT_NO_DATA_TEXT,
     SET_USAGE,
     CommandService,
 )
@@ -38,6 +37,7 @@ from services.config import resolve_group_settings
 from services.errors import ErrorCode
 from services.models import CommandRequest, ForecastSnapshot, GroupOverride, LogicalEvent
 from services.repository import Repository
+from services.reset_summary import NO_SUBSCRIPTION_TEXT
 
 UMO = "aiocqhttp:GroupMessage:1001"
 PRIVATE_UMO = "aiocqhttp:FriendMessage:42"
@@ -137,9 +137,10 @@ def test_non_admin_is_rejected_but_can_query(tmp_path: Path) -> None:
             assert await repo.list_subscriptions() == []
             assert sink.synced == []
 
+            await create_subscription(repo)
             status = await service.handle(_request("status", is_admin=False))
             assert status.error is None
-            assert "监控开关" in status.text
+            assert "Codex：暂无确认记录" in status.text
             assert "数据来源：https://codex-reset.com/" in status.text
         finally:
             await repo.close()
@@ -246,32 +247,25 @@ def test_report_command_sends_image_and_never_fetches(tmp_path: Path) -> None:
             daily=bundle.pipeline,
         )
         try:
-            # ① 无快照：明确「暂无数据」，且不触发任何上游请求
+            await create_subscription(repo)
+
+            # ① 有订阅但尚无确认记录：展示本群产品的空状态，不触发上游请求
             empty = await service.handle(_request("report"))
-            assert empty.error == "no_data"
-            assert REPORT_NO_DATA_TEXT in empty.text
-            assert empty.image is None
+            assert empty.error is None
+            assert "Codex：暂无确认记录" in empty.text
+            assert empty.image is not None
             assert bundle.client.calls == []
 
-            # ② 注入新鲜快照后手动出图
-            now = clock.utcnow()
-            bundle.pipeline._cache["forecast"] = ForecastSnapshot(  # noqa: SLF001
-                updated_at=now - timedelta(minutes=1),
-                rounded_24h=37,
-                rounded_48h=62,
-                confidence="medium",
-                last_reset_at=None,
-                latest_alert=None,
-                fetched_at=now,
-            )
+            # ② 写入一条确认记录后，报告显示该群产品的最新北京时间及来源
+            await _seed_reset(repo, "report-01", "2026-10-20T11:00:00Z")
             clock.advance(61)  # report 限频 60s
             reply = await service.handle(_request("report"))
             assert reply.error is None
             assert reply.image is not None
             assert reply.image.startswith(b"\x89PNG")
-            # 文本兜底内容同样齐全（来源署名 + 实验性声明）
+            # 文本摘要同样包含确认时间与来源署名
+            assert "Codex：已重置 · 2026-10-20 19:00" in reply.text
             assert "数据来源：https://codex-reset.com/" in reply.text
-            assert "实验性预测" in reply.text
             assert bundle.client.calls == []
 
             # ③ 手动通道不入库、不消耗当天自动日报的唯一发送权
@@ -302,7 +296,7 @@ def test_set_daily_switch_writes_override(tmp_path: Path) -> None:
             await service.handle(_request("subscribe"))
             clock.advance(6)
             on = await service.handle(_request("set", ("daily", "on")))
-            assert "每日预测图片" in on.text
+            assert "每日重置简报" in on.text
             assert "开启" in on.text
 
             clock.advance(6)
@@ -595,7 +589,7 @@ def test_stale_data_appends_warning_line(tmp_path: Path) -> None:
         clock, repo, _bundle, _sink, service = await _boot(tmp_path)
         try:
             # 只重建缓存、不写库：直接构造一个「无快照」的读模型状态
-            reply = await service.handle(_request("status"))
+            reply = await service.handle(_request("status", ("detail",)))
             assert "⚠️ 数据可能已过时" in reply.text
             await _seed_reset(repo, "2112432076767289678", "2026-10-20T11:00:00Z")
             clock.advance(20)
@@ -668,7 +662,7 @@ def test_subscribe_is_blocked_at_group_limit(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# P2-05：`/cr status` 必须能诊断「基线未建立」「forecast 端点失败」
+# P2-05：`/cr status detail` 必须能诊断「基线未建立」「forecast 端点失败」
 # ---------------------------------------------------------------------------
 def test_status_reports_missing_baseline(tmp_path: Path) -> None:
     """基线未建立时自动通知整体暂缓，必须在 status 里说出来（否则现象是「永久零通知」）。"""
@@ -676,7 +670,7 @@ def test_status_reports_missing_baseline(tmp_path: Path) -> None:
     async def scenario() -> None:
         clock, repo, _bundle, _sink, service = await _boot(tmp_path)
         try:
-            reply = await service.handle(_request("status"))
+            reply = await service.handle(_request("status", ("detail",)))
             assert "⚠️ 基线尚未建立（timeline 未成功采集），自动通知暂缓。" in reply.text
             assert "forecast 端点最近采集失败" not in reply.text
         finally:
@@ -695,7 +689,7 @@ def test_status_reports_forecast_endpoint_failure(tmp_path: Path) -> None:
             await bundle.pipeline.ingest(
                 "forecast", error_fetch("forecast", ErrorCode.HTTP_5XX, status=502)
             )
-            reply = await service.handle(_request("status"))
+            reply = await service.handle(_request("status", ("detail",)))
             assert "基线尚未建立" not in reply.text
             assert "⚠️ forecast 端点最近采集失败，概率与 Watch 可能不更新。" in reply.text
         finally:
@@ -705,7 +699,7 @@ def test_status_reports_forecast_endpoint_failure(tmp_path: Path) -> None:
 
 
 def test_status_shows_reset_probability_watch_and_updated_at(tmp_path: Path) -> None:
-    """C01：`/cr status` 四项要素齐备（最近确认重置 / 概率 / 预告状态 / 数据更新时间）。"""
+    """旧诊断详情保留最近确认重置 / 概率 / 预告状态 / 数据更新时间。"""
 
     async def scenario() -> None:
         clock, repo, bundle, _sink, service = await _boot(tmp_path)
@@ -722,7 +716,7 @@ def test_status_shows_reset_probability_watch_and_updated_at(tmp_path: Path) -> 
                 latest_alert=None,
                 fetched_at=now,
             )
-            reply = await service.handle(_request("status"))
+            reply = await service.handle(_request("status", ("detail",)))
             assert "最新预测：24h 37% / 48h 62%" in reply.text
             assert "统计更新：" in reply.text
             # 11:00Z → 北京时间 19:00；且必须来自**已确认重置**事件而非权益
@@ -750,7 +744,7 @@ def test_status_has_no_diagnostic_lines_when_healthy(tmp_path: Path) -> None:
                     fetched_at=clock.utcnow(),
                 ),
             )
-            reply = await service.handle(_request("status"))
+            reply = await service.handle(_request("status", ("detail",)))
             assert "⚠️ 基线" not in reply.text
             assert "forecast 端点最近采集失败" not in reply.text
         finally:
@@ -760,6 +754,27 @@ def test_status_has_no_diagnostic_lines_when_healthy(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Group status: only subscribed products and their latest confirmed resets
+def test_group_status_shows_only_subscribed_product_reset(tmp_path: Path) -> None:
+    """群状态只显示该群订阅产品的最近已确认重置和来源。"""
+
+    async def scenario() -> None:
+        _clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            await create_subscription(repo)
+            await _seed_reset(repo, "status-01", "2026-10-20T11:00:00Z")
+            reply = await service.handle(_request("status"))
+            assert reply.error is None
+            assert "Codex：已重置 · 2026-10-20 19:00" in reply.text
+            assert "Claude" not in reply.text
+            assert "Grok" not in reply.text
+            assert "数据来源：https://codex-reset.com/" in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
 # P2-09 / P2-10：history 只列确认重置；只读实例拒绝写指令
 # ---------------------------------------------------------------------------
 def test_history_excludes_non_reset_and_downgraded_rows(tmp_path: Path) -> None:
@@ -854,31 +869,23 @@ def test_readonly_instance_rejects_write_commands_but_allows_queries(tmp_path: P
 class FakeDaily:
     """`DailyReportProvider` 替身：返回预置的 `(png, payload, reason)`。"""
 
-    def __init__(self, result: tuple[bytes | None, dict[str, Any] | None, str | None]) -> None:
+    def __init__(self, result: tuple[bytes | None, dict[str, Any], str | None]) -> None:
         self.result = result
-        self.calls: list[tuple[bool, str | None]] = []
+        self.calls: list[tuple[tuple[str, ...], bool]] = []
 
     async def manual_report_png(
-        self, *, now: Any, test: bool = False, theme: str | None = None
-    ) -> tuple[bytes | None, dict[str, Any] | None, str | None]:
-        self.calls.append((test, theme))
+        self, *, products: tuple[str, ...], test: bool = False
+    ) -> tuple[bytes | None, dict[str, Any], str | None]:
+        self.calls.append((products, test))
         return self.result
 
 
-def _report_payload() -> dict[str, Any]:
+def _report_payload(
+    *, test: bool = False, reset_at: str | None = "2026-10-20T11:00:00+00:00"
+) -> dict[str, Any]:
     return {
-        "business_date": "2026-10-20",
-        "rounded_24h": 37,
-        "rounded_48h": 62,
-        "confidence": "medium",
-        "updated_at": "2026-10-20T01:00:00+00:00",
-        "last_reset_at": None,
-        "watch_status": "none",
-        "watch_window": None,
-        "stale": False,
-        "theme": "dark",
-        "manual": True,
-        "test": False,
+        "resets": {"codex": reset_at},
+        "test": test,
     }
 
 
@@ -914,6 +921,7 @@ def test_report_command_classifies_render_failures(tmp_path: Path) -> None:
                 tmp_path, FakeDaily((None, _report_payload(), reason))
             )
             try:
+                await create_subscription(repo)
                 reply = await service.handle(_request("report"))
                 out[reason] = reply.text
                 assert reply.error == "render_failed"
@@ -926,14 +934,17 @@ def test_report_command_classifies_render_failures(tmp_path: Path) -> None:
     run(scenario())
 
 
-def test_report_command_no_data_keeps_existing_hint(tmp_path: Path) -> None:
-    """改动 2：payload 为 None 时保持「暂无数据」提示。"""
+def test_report_command_without_subscription_sends_no_image(tmp_path: Path) -> None:
+    """未订阅群执行报告命令时收到简短提示，不生成图片。"""
     async def scenario() -> None:
-        service, repo = await _make_service_with_daily(tmp_path, FakeDaily((None, None, None)))
+        service, repo = await _make_service_with_daily(
+            tmp_path, FakeDaily((b"png", _report_payload(), None))
+        )
         try:
             reply = await service.handle(_request("report"))
-            assert reply.error == "no_data"
-            assert REPORT_NO_DATA_TEXT in reply.text
+            assert reply.error == "not_subscribed"
+            assert NO_SUBSCRIPTION_TEXT in reply.text
+            assert reply.image is None
         finally:
             await repo.close()
 
@@ -941,12 +952,13 @@ def test_report_command_no_data_keeps_existing_hint(tmp_path: Path) -> None:
 
 
 def test_test_image_command_classifies_render_failures(tmp_path: Path) -> None:
-    """改动 2：`/cr test image` 失败分类带「🧪【测试消息】」前缀 + 来源署名，且不含「图片发送失败」。"""
+    """`/cr test image` 失败分类带测试图片标记和来源署名。"""
     async def scenario() -> None:
         service, repo = await _make_service_with_daily(
-            tmp_path, FakeDaily((None, _report_payload(), "font_missing"))
+            tmp_path, FakeDaily((None, _report_payload(test=True), "font_missing"))
         )
         try:
+            await create_subscription(repo)
             reply = await service.handle(_request("test", args=("image",)))
             assert reply.error == "render_failed"
             assert "🧪【测试消息】" in reply.text
@@ -960,13 +972,13 @@ def test_test_image_command_classifies_render_failures(tmp_path: Path) -> None:
 
 
 def test_status_shows_image_environment_and_daily_switch(tmp_path: Path) -> None:
-    """改动 3：`/cr status` 展示图片环境与每日预测图片双层开关。"""
+    """旧诊断详情展示图片环境与每日重置简报双层开关。"""
     async def scenario() -> None:
         clock, repo, _bundle, _sink, service = await _boot(tmp_path)
         try:
-            reply = await service.handle(_request("status"))
+            reply = await service.handle(_request("status", ("detail",)))
             assert "图片环境：" in reply.text
-            assert "每日预测图片：全局" in reply.text
+            assert "每日重置简报：全局" in reply.text
             assert "本群" in reply.text
         finally:
             await repo.close()
@@ -997,14 +1009,14 @@ def test_settings_shows_two_layer_daily_switch(tmp_path: Path) -> None:
         try:
             await service.handle(_request("subscribe"))
             settings_reply = await service.handle(_request("settings"))
-            assert "每日预测图片：全局 开启 ｜ 本群 开启（全局默认）" in settings_reply.text
+            assert "每日重置简报：全局 开启 ｜ 本群 开启（全局默认）" in settings_reply.text
 
             # 本群关闭 daily → 全局开 / 本群关（群覆盖）
             clock.advance(6)
             await service.handle(_request("set", ("daily", "off")))
             clock.advance(6)
             settings_reply = await service.handle(_request("settings"))
-            assert "每日预测图片：全局 开启 ｜ 本群 关闭（群覆盖）" in settings_reply.text
+            assert "每日重置简报：全局 开启 ｜ 本群 关闭（群覆盖）" in settings_reply.text
         finally:
             await repo.close()
 

@@ -1,4 +1,4 @@
-# 验收执行单（Runbook）· AI 额度雷达 V1.6.2
+# 验收执行单（Runbook）· AI 额度雷达 V1.7.0
 
 > `docs/ACCEPTANCE.md` 是**覆盖矩阵**（有没有覆盖）；本文是**执行手册**（今天怎么敲、看到什么算过）。
 > 二者不重复：本文不重抄 AC-01~24 场景，只给可粘贴命令、**逐字**期望文案与判定口径。
@@ -49,14 +49,9 @@ PY
 > 否则会看到 `请等待 15 秒后再试。`——那是限频不是故障。`/cr help` 是独立键，可立即发。
 
 **A-1 `/cr`**
-- 操作：群里发 `/cr`。
-- 期望：首行 `📡【AI 额度雷达 · 状态】`，并**逐行**含（顺序固定）：
-  `监控开关：开启`（关时 `监控开关：已关闭（enable_monitor=false）`）；`最近采集：<时间>` 或 `最近采集：暂无记录`；
-  `最新预测：` 二选一 `还没有可用的 forecast 快照` / `24h N% / 48h N%（置信度：低|中|高|未知）`；
-  `订阅群数：N`；末行独立署名 `数据来源：https://codex-reset.com/`。
-  首轮未建基线另有 `⚠️ 基线尚未建立（timeline 未成功采集），自动通知暂缓。`；
-  数据陈旧另有 `⚠️ 数据可能已过时（最近采集：<时间|未知>）。`
-- 判定：PASS = 标签齐全 + 有署名行；FAIL = 缺标题/署名/无响应/回「尚未初始化」。
+- 操作：在已订阅群发 `/cr`。
+- 期望：仅显示本群已订阅产品，每个产品恰好一行，显示最近一次已确认重置的北京时间或「暂无已确认记录」，并保留该产品来源标注。未订阅群收到简短提示。私聊状态继续显示全部五个产品；`/cr status detail` 继续提供旧诊断信息。
+- 判定：PASS = 每个已订阅产品一行且时间/无记录状态和来源标注清楚；FAIL = 出现未订阅产品、缺来源标注、无响应或回「尚未初始化」。
 - 不通过先看：`docker logs <CT> --since 10m 2>&1 | grep -E "初始化完成|指令处理失败|尚未初始化"`
 
 **A-2 `/cr help`**
@@ -73,7 +68,7 @@ PY
   `提示：/cr 可能被其他插件占用，如无响应请改用 /codexreset。`）
 
 **A-3 `/cr status`（间隔 ≥15s）**
-- 操作：等 A-1 满 15 秒后发 `/cr status`。 期望：同 A-1 格式，**不应**出现限频文案。
+- 操作：等 A-1 满 15 秒后在已订阅群发 `/cr status`。期望：只列本群已订阅产品，每个产品一行，显示最近一次已确认重置（北京时间）或「暂无已确认记录」，并保留对应来源标注；**不应**出现限频文案。未订阅群应收到简短提示，不含图片。`/cr status detail` 保留旧诊断视图。私聊状态仍列出全部五个产品。
 - 判定：出现 `请等待 N 秒后再试。` → 判「间隔不足」，重做而非 FAIL。
 - 不通过先看：`grep "\[codex-reset\]\[repo\] opened db"`（库没开则一切查询异常）。
 
@@ -310,12 +305,12 @@ python -m pytest tests/test_scheduler.py tests/test_client.py -q
 - 若在隔离环境收集调度日志，第二条独立证据为 `meta.health:{endpoint}` = `{"error_code": "...", "at": "..."}`。只读查询：
   `docker exec -i <隔离测试容器> python3 - "SELECT key,value,updated_at FROM meta WHERE key LIKE 'health:%'" < ev/dbq.py`
   → 失败期 `error_code` 变 `network`/`timeout`/`http_5xx`，恢复后回 `ok`。
-  ⚠️ `health:*` 是给运维查库用的旁路；`/cr status` 的 `⚠️ forecast 端点最近采集失败…` 读的是
+  ⚠️ `health:*` 是给运维查库用的旁路；`/cr status detail` 的 `⚠️ forecast 端点最近采集失败…` 读的是
   `source_snapshots.ok`，不是同一张表。
 - 判定：隔离环境证据至少包含 ≥2 级退避及 `health:*` 变化；不得在生产容器上制造断网。自动化测试绿或群内零伪造消息都不单独构成此项 PASS。
 **F-4 时间显示随 `time_zone` 热更新**
 - 操作：改 `<AD>/config/astrbot_plugin_codex_reset_config.json` 的 `"time_zone"` 为 `"UTC"`，**不重启**，
-  等 5~10s 发 `/cr status`。
+  等 5~10s 发 `/cr status detail`。
 - 期望：日志 `[codex-reset][main] 配置已热更新 spacing=60 monitor=True tz=UTC`（≤5s，`POLL_TICK_SECONDS=5.0`）；
   状态时间后缀由 `（北京时间）` 变 `（UTC）`，数值同时 −8h；`/cr test` 的 `确认记录时间：2026-01-01 00:00（UTC）`。
 - 判定：PASS = 热更新日志 + 后缀生效 + **全程未重启**。反向：填 `Mars/Olympus` →
@@ -330,8 +325,8 @@ python -m pytest tests/test_scheduler.py tests/test_client.py -q
 | 任何指令回「插件尚未初始化完成，请稍后重试。」 | 插件刚重载，`initialize()` 未完成 | 等 10s；仍不行 grep `初始化完成`/`数据库打开失败` |
 | 写指令回「🔒 只读模式…」 | ① 另一实例在跑；② 上次被 kill -9/OOM（心跳 <120s 且无干净退出标记）；③ 从旧格式升级（L-4） | 确认无第二容器共用 `data` 卷；**再重启一次**（间隔 >120s）；查 `runtime:owner`/`heartbeat_at` |
 | `/cr groups` 只回「请在私聊中执行…」 | 在群里执行了（设计如此） | 私聊机器人执行 |
-| `/cr status` 长期「暂无记录」/ 数据陈旧 | 站点不可达、退避中、或 `enable_monitor=false` | 看 `health:*` 与 `backoff_s=` 日志；看 `⚠️ forecast 端点最近采集失败…` 行 |
-| 出现「⚠️ 基线尚未建立…自动通知暂缓」 | `timeline` 从未成功采集（首轮无基线） | 等轮换轮到 timeline（`forecast→timeline→forecast→feed`，60s 队列）；持续 `schema_error` 需查站点字段 |
+| `/cr status` 长期「暂无已确认记录」 | 尚无已确认重置，站点不可达、退避中、或 `enable_monitor=false` | 用 `/cr status detail` 查看采集时间与诊断；再看 `health:*` 和 `backoff_s=` 日志 |
+| `/cr status detail` 出现「⚠️ 基线尚未建立…自动通知暂缓」 | `timeline` 从未成功采集（首轮无基线） | 等轮换轮到 timeline（`forecast→timeline→forecast→feed`，60s 队列）；持续 `schema_error` 需查站点字段 |
 | 重启后重复收到旧消息 | `plugin_data` 未持久化，或容器重建换了路径 | 回查 0.5/0.6；看 `logical_events` 是否为空 |
 | `/cr` 后立刻 `/cr status` 被限频 | 二者同属 `status` 键（15s） | 间隔 ≥15s |
 | `subscribe` 回「已达群上限 50 个」 | 群数达 `group_limit`（默认 50，**非** schema 字段） | 先 `/cr unsubscribe` 掉不用的群 |
@@ -387,32 +382,32 @@ E:/Anaconda3/python.exe -m pytest tests/test_acceptance_matrix.py -v   # 矩阵�
 ⚠️ **自动化绿 ≠ AC 通过**：AC-15/16/17/22/25/26 在矩阵中仍为 `待验收（模拟测试已覆盖）`，
 只有本执行单填完并回填 `docs/ACCEPTANCE.md` §3 记录后才能改为「通过」。
 
-### 9.1 每日预测图片（AC-25 / AC-26）真机步骤
+### 9.1 每日重置状态图片（AC-25 / AC-26）真机步骤
 
 前置：插件包带有 `resources/fonts/NotoSansCJKsc-Regular.otf` 和许可证；`/cr status` 显示「图片环境：就绪（内置中文字体）」。容器不需另装系统 CJK 字体。
 
 | 步 | 操作 | 期望 | 失败则记 |
 | --- | --- | --- | --- |
-| P-1 | 全局 `enable_daily_report=true`；群 A 执行 `/cr set daily on` | 回显「每日预测图片 → 开启」，WebUI 卡片同步 | AC-26 FAIL |
-| P-2 | 群 A 执行 `/cr report` | 立即收到一张 PNG（900×1200），含 24h/48h 概率与来源署名 | AC-26 FAIL（先查字体与 `Pillow` 是否安装） |
+| P-1 | 全局 `enable_daily_report=true`；群 A 执行 `/cr set daily on` | 回显每日重置简报已开启，WebUI 群设置同步 | AC-26 FAIL |
+| P-2 | 群 A 执行 `/cr report` | 立即收到一张宽 900 像素、高度自适应的 PNG；仅含本群已订阅产品，每个产品一行，展示最近一次已确认重置（北京时间）或「暂无确认记录」，并保留来源标注 | AC-26 FAIL（先查字体与 `Pillow` 是否安装） |
 | P-3 | 记录当天 `daily_reports` 行：`SELECT * FROM daily_reports;` | **没有** P-2 产生的行（手动不占额度） | AC-26 FAIL |
-| P-4 | 等到一个真实 `daily_report_time`（默认 09:00） | 群 A 收到**一张**自动图片；再次 `SELECT` 应看到 `status='sent'` | AC-25 FAIL |
+| P-4 | 等到一个真实 `daily_report_time`（默认北京时间 09:00） | 仅对全局开关开启、且群内每日报告开启的订阅群发送；每群一张图片，只列该群订阅产品；原有重试间隔与补发窗口仍生效；再次 `SELECT` 应看到 `status='sent'` | AC-25 FAIL |
 | P-5 | 在到期窗口内 `docker restart <CT>` 后观察 | 当天**不再**重复发图 | AC-25 FAIL |
 | P-6 | `/cr set daily off`；等次日 09:00 | 群 A 次日不再收到自动图片 | AC-26 FAIL |
-| P-7 | 未订阅群 B 执行 `/cr report` | 能出图（手动通道与 `/cr test` 同语义，不要求订阅），但该群**不会**收到自动日报 | AC-26 FAIL |
-| P-8 | 群 A 执行 `/cr test image` | 收到带「测试图片」标记的图；`daily_reports` 无新增行 | AC-26 FAIL |
+| P-7 | 未订阅群 B 执行 `/cr report` | 收到简短提示，不发送 PNG | AC-26 FAIL |
+| P-8 | 群 A 执行 `/cr test image` | 收到测试标记消息和图片；图片标题为「最近确认重置（测试）」，数据来自本群当前订阅产品；`daily_reports` 无新增行 | AC-26 FAIL |
 
 > P-4/P-5 需要跨天，是本版本**唯一无法在单次会话内完成**的验收项。
 
 **本文不覆盖**：多群并发（AC-13）仅建议抽查两群；>7 天长期 WAL/内存增长与审计跨月切分归长稳；
 上游字段变更（AC-23）不可主动构造，不建议为验收伪造站点响应。
 
-## 10. v1.6.2 多产品采集验收
+## 10. 多产品采集验收
 
-本节验收 Claude、Grok Bot、Grok Build、Antigravity Gemini。四个新增全局开关
-`enable_claude`、`enable_grok_bot`、`enable_grok_build`、`enable_antigravity_gemini` 均默认 `false`；
+本节验收 Claude、Grok Bot、Grok / Build、Antigravity Gemini 和 Google Gemini。五个全局开关
+`enable_claude`、`enable_grok_bot`、`enable_grok_build`、`enable_antigravity_gemini`、`enable_gemini` 均默认 `false`；
 先确认关闭时无对应产品请求，再只启用待验产品。裸 `/cr subscribe` 和 `/cr test` 仍用于 Codex，裸
-`/cr unsubscribe` 取消该群全部产品。产品参数为 `claude`、`grok-bot`、`grok-build`、`antigravity-gemini`。
+`/cr unsubscribe` 取消该群全部产品。产品参数为 `claude`、`grok-bot`、`grok-build`、`antigravity-gemini`、`gemini`。
 
 ### 10.1 容器数据源探针（只读）
 
@@ -426,12 +421,13 @@ import aiohttp
 
 endpoints = {
     "claude": "https://claudereset.org/api/v1/timeline.json",
+    "claude-forecast": "https://claudereset.org/api/v1/forecast.json",
     "grok": "https://quotaresets.com/api/v1/events.json",
     "agy-resets": "https://www.agyresets.com/api/v1/resets",
     "agy-status": "https://www.agyresets.com/api/v1/status",
 }
 headers = {
-    "User-Agent": "AstrBot Codex Reset Radar/1.6.2 "
+    "User-Agent": "AstrBot Codex Reset Radar/1.7.0 "
                   "(+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)",
     "Accept": "application/json",
     "Accept-Encoding": "identity",
@@ -472,7 +468,7 @@ docker exec -i astrbot python3 - <<'PY'
 import sqlite3
 from pathlib import Path
 src = Path('/AstrBot/data/plugin_data/astrbot_plugin_codex_reset/codex_reset.db')
-dst = src.with_name('codex_reset.pre-v1.6.2.backup.db')
+dst = src.with_name('codex_reset.pre-v1.7.0.backup.db')
 with sqlite3.connect(f'file:{src}?mode=ro', uri=True) as source, sqlite3.connect(dst) as backup:
     source.backup(backup)
     result = backup.execute('PRAGMA integrity_check').fetchone()[0]
@@ -484,12 +480,12 @@ PY
 
 ### 10.3 产品基线与真实来源判定
 
-1. 在 WebUI 记录四个新增开关为 `false`，保存后等待至少一个采集轮询周期；以容器日志/受控出站代理计数确认没有这四类来源请求。只看 `/cr status` 里“关闭”不足以证明没有请求。
-2. 为一个隔离验收群依次执行 `/cr subscribe claude`、`/cr subscribe grok-bot`、`/cr subscribe grok-build`、`/cr subscribe antigravity-gemini`。再用 `/cr status` 确认订阅及各产品的开关/最近采集状态。以上仅证明本地订阅配置。首次采集前后核对基线待建立 → 就绪，以及采集日志 `baseline=True` 且 `deliveries=0`。
+1. 在 WebUI 将上述五项关闭，保存后用容器日志或受控出站代理核对这些来源的请求停止。Grok Bot、Grok / Build 和 Google Gemini 共用一个请求，任意一项开着都需要请求 QuotaResets。
+2. 给隔离验收群逐项执行 `/cr subscribe PRODUCT`。用 `/cr status` 确认该群订阅产品及其最近确认重置，用 `/cr status detail` 核对开关和采集状态。首轮成功后核对日志 `baseline=True` 且 `deliveries=0`。
 3. 每次只打开一个全局开关，等待该产品自己的采集周期，记录请求时间、HTTP 状态（或传输错误）、解析后的产品/事件类型/时间戳及响应诊断。响应诊断只记 HTTP 状态、脱敏后的 JSON 字段名、类型、记录数和解析结果；不得保存或展示认证信息、个人标识、完整原始响应或可能含敏感信息的 URL。
 4. Claude：确认实际采集到 `timeline` 来源响应，并记录其可识别事件类型/时间字段与解析结果；不能用手工构造 timeline 样例冒充真实来源。
 5. Grok Bot、Grok Build：分别记录 `quotaresets` 来源是否响应及各自解析到的产品、事件类型和重置时间。两产品分开开关、分开订阅和分开记证据；一个端点返回成功不能替另一个产品判 PASS。
-6. Antigravity Gemini：记录 `resets` 与 `status` 两类来源各自的响应/失败诊断、解析结果和采集时间；仅有其中一个来源成功时只记部分结果。
+6. Antigravity Gemini：核对 `resets` 与 `status` 的响应和解析结果，`active_watch` 有效时使用「可能重置」文案。Google Gemini 单独核对 QuotaResets 的 `provider=gemini` 重置记录。
 7. 用 `/cr test PRODUCT` 验证群消息格式和产品标记，再等待自然产生的真实事件进行端到端核验：来源响应 → 解析事件 → SQLite 事件/投递记录 → QQ 群收到对应产品消息。测试命令发送的是样例消息，不入库、不建投递，不能作为真实来源或真实事件验收证据。
 8. 对每个产品将结果分别标为 `真实来源已验证`、`部分来源已验证`、`仅模拟/样例`、`未验证` 或 `失败`。只有观察到真实来源数据解析以及真实 QQ 收件，才可标记端到端 PASS；没有自然事件则记 `N/A（无事件）`，不得伪造事件或把样例升级为 PASS。
 
@@ -505,6 +501,8 @@ PY
 ```
 
 对 `grok-bot`、`grok-build`、`antigravity-gemini` 重复上述序列；确认 `/cr test PRODUCT` 显示测试/样例标记，而订阅状态在退订后只移除对应产品。另单独核对不带产品名的 `/cr subscribe` 与 `/cr test` 仍保持 Codex 旧语义。
+
+`/cr test antigravity-gemini watch` 可核对「可能重置」消息在 QQ 中可见。等待真实新预警时记录采集日志的 `deliveries` 与群实际收件时间，并确认后续确认消息单独发送。
 
 回滚时先在 WebUI 将对应新增 `enable_*` 开关关闭并保存，逐个执行 `/cr unsubscribe PRODUCT`，检查 `/cr status` 不再显示该群订阅该产品；确认产品请求停止。不要删除数据库或清空事件表。若版本回退，先停止 AstrBot，再用本节 10.2 创建的 SQLite Backup API 副本按部署流程恢复；恢复前将当前库另行备份，并记录回滚前后文件校验信息。回退后核对原 Codex 订阅、事件与日报状态，再启动服务并观察日志。
 
@@ -638,7 +636,7 @@ PY
  3 小号     群A  /cr unsubscribe            # 仅管理员可执行该指令。…
  4 小号     群A  /cr set forecast off       # 仅管理员可执行该指令。…
  5 管理员   群A  /cr settings               # ⚙️【本群生效配置】 / 6 行全「（全局默认）」
- 6 小号     群A  /cr status                 # 📡【AI 额度雷达 · 状态】
+ 6 小号     群A  /cr status                 # 本群订阅产品及最近已确认重置
  7 小号     群A  /cr forecast               # 📈【重置概率预测】或「暂无数据：…」
  8 管理员   群A  /cr test                   # 🧪【测试消息】以下为样例，非真实事件
  9 管理员   群A  /cr unsubscribe            # ✅ 已取消订阅：…
@@ -646,10 +644,10 @@ PY
 11 管理员   群B  /cr test                   # 🧪【测试消息】…（群B 必须未订阅）
 12 管理员   群B  /cr test   ← 立刻重发      # 请等待 58 秒后再试。
 13 管理员   群A  /cr subscribe              # ✅ 订阅成功…（为 AC-17 重新铺路）
-14 管理员   群A  /cr status                 # 记录「最近采集 / 订阅群数」
+14 管理员   群A  /cr status detail          # 记录「最近采集 / 订阅群数」
 15 管理员   群A  /cr history 5              # 记录条数
 16 宿主机   ——   docker restart astrbot     # AstrBot 不能执行；随后按 §D-3 grep 日志
-17 管理员   群A  /cr status                 # 采集时间变新、订阅群数不变
+17 管理员   群A  /cr status detail          # 采集时间变新、订阅群数不变
 18 管理员   群A  /cr history 5              # 条数与第 15 步一致
 19 管理员   群A  /cr subscribe              # 「本群已订阅：…」；若是「🔒 只读模式」→ §F-1
 20 管理员   私聊 /cr groups                 # 群A 仍在、uncertain 未飙升

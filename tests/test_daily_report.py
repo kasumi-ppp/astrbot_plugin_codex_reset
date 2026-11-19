@@ -519,28 +519,6 @@ def test_daily_report_outside_window_is_ignored(tmp_path: Path) -> None:
     assert image_send.calls == []
 
 
-def test_daily_report_stale_data_is_skipped_with_error(tmp_path: Path) -> None:
-    """P11：陈旧数据不发送正常日报，并留下错误记录。"""
-    pipeline, image_send, _, repo, clock = _make_daily_pipeline(tmp_path)
-    run(create_subscription(repo))
-    run(repo.update_subscription_override(
-        "aiocqhttp:GroupMessage:1001", GroupOverride(enable_daily_report=True)
-    ))
-    _seed_forecast(pipeline, clock)
-    # 把快照改旧（超过 max_source_age_minutes=10）
-    pipeline._cache["forecast"] = pipeline.forecast().__class__(  # noqa: SLF001
-        updated_at=clock.utcnow() - timedelta(hours=3),
-        rounded_24h=37,
-        rounded_48h=62,
-        confidence="medium",
-    )
-    assert run(pipeline.run_daily_reports(utc(2026, 10, 20, 1, 5))) == 0
-    assert image_send.calls == []
-    sub_id = run(repo.list_subscriptions())[0].subscription_id
-    row = run(repo.get_daily_report(sub_id, "2026-10-20"))
-    assert row is not None and row.status == "skipped" and row.error_code == "stale_data"
-
-
 def test_daily_report_text_fallback_on_image_failure(tmp_path: Path) -> None:
     """P10 / AC12：图片明确失败可降级文本，且当日不再重复投递。"""
     pipeline, image_send, send, repo, _ = _make_daily_pipeline(
@@ -555,8 +533,8 @@ def test_daily_report_text_fallback_on_image_failure(tmp_path: Path) -> None:
     assert len(image_send.calls) == 1
     assert len(send.texts) == 1
     text = send.texts[0]
-    assert "24 小时：37%" in text
-    assert "48 小时：62%" in text
+    assert "Codex：暂无确认记录" in text
+    assert "24 小时" not in text
     assert "codex-reset.com" in text
     sub_id = run(repo.list_subscriptions())[0].subscription_id
     row = run(repo.get_daily_report(sub_id, "2026-10-20"))
@@ -634,10 +612,10 @@ def test_manual_report_does_not_consume_daily_quota(tmp_path: Path) -> None:
     """P09：`/cr report` 不占用当天自动日报唯一发送权，也不改变定时任务状态。"""
     pipeline, image_send, _, repo, _ = _make_daily_pipeline(tmp_path)
     _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
-    png, payload, render_error = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+    png, payload, render_error = run(pipeline.manual_report_png(products=("codex",)))
     assert png is not None and payload is not None and render_error is None
     assert png.startswith(b"\x89PNG")
-    assert payload["manual"] is True and payload["test"] is False
+    assert payload["resets"] == {"codex": None} and payload["test"] is False
     assert run(repo.list_daily_reports()) == []
     # 之后的自动日报照常发送
     run(create_subscription(repo))
@@ -653,16 +631,17 @@ def test_manual_report_test_flag_is_labelled(tmp_path: Path) -> None:
     pipeline, _, _, _, _ = _make_daily_pipeline(tmp_path)
     _seed_forecast(pipeline, FakeClock(utc(2026, 10, 20, 1, 4)))
     png, payload, render_error = run(
-        pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5), test=True)
+        pipeline.manual_report_png(products=("codex",), test=True)
     )
     assert png is not None and render_error is None
     assert payload is not None and payload["test"] is True
 
 
-def test_manual_report_without_snapshot_returns_none(tmp_path: Path) -> None:
+def test_manual_report_without_snapshot_shows_no_confirmation(tmp_path: Path) -> None:
     pipeline, _, _, _, _ = _make_daily_pipeline(tmp_path)
-    png, payload, render_error = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
-    assert png is None and payload is None and render_error is None
+    png, payload, render_error = run(pipeline.manual_report_png(products=("codex",)))
+    assert png is not None and render_error is None
+    assert payload["resets"] == {"codex": None}
 
 
 def test_manual_report_classifies_render_failure_reasons(
@@ -683,114 +662,49 @@ def test_manual_report_classifies_render_failure_reasons(
         def _boom(data: Any, *, tz: Any = None, _reason: str = reason) -> bytes:
             raise ReportRenderError("boom", reason=_reason)
 
-        monkeypatch.setattr(pl, "render_report_png", _boom)
-        png, payload, err = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+        monkeypatch.setattr(pl, "render_reset_report_png", _boom)
+        png, payload, err = run(pipeline.manual_report_png(products=("codex",)))
         assert png is None
-        assert payload is not None and payload["manual"] is True
+        assert payload is not None and payload["resets"] == {"codex": None}
         assert err == expected
 
     def _hang(data: Any, *, tz: Any = None) -> bytes:
         raise TimeoutError()
 
-    monkeypatch.setattr(pl, "render_report_png", _hang)
-    png, payload, err = run(pipeline.manual_report_png(now=utc(2026, 10, 20, 1, 5)))
+    monkeypatch.setattr(pl, "render_reset_report_png", _hang)
+    png, payload, err = run(pipeline.manual_report_png(products=("codex",)))
     assert png is None and payload is not None and err == "render_timeout"
 
 
 # ---------------------------------------------------------------------------
-# 数据正确性（P04 / P05 / P11）
+# 产品选择与确认状态
 # ---------------------------------------------------------------------------
-def test_build_report_data_uses_only_confirmed_reset(tmp_path: Path) -> None:
-    """P04：最近重置只取已确认记录，绝不混入权益时间。"""
-    pipeline, _, _, repo, clock = _make_daily_pipeline(tmp_path)
-    _seed_forecast(pipeline, clock)
-    credit_like = LogicalEvent(
-        logical_id="credits:1",
-        kind="credits",
-        group_kind="credits",
-        state_version="available",
-        occurred_at=clock.utcnow(),
-        payload={},
-    )
-    run(repo.record_logical_event(credit_like, baseline=False))
-    data = run(pipeline.build_report_data(clock.utcnow()))
-    assert data is not None and data.last_reset_at is None  # 权益时间不得充当重置时间
+def test_gemini_only_daily_summary_without_forecast(tmp_path: Path) -> None:
+    pipeline, _, send, repo, _ = _make_daily_pipeline(tmp_path, image_outcomes=[False])
+    group = "aiocqhttp:GroupMessage:1001"
+    run(repo.change_product_subscription(
+        umo=group, platform="aiocqhttp", group_id="1001", group_name="example",
+        product="antigravity-gemini", subscribe=True, group_limit=5,
+    ))
+    product = "antigravity-gemini"
+    valid_at = utc(2026, 10, 18, 22, 15)
+    for name, state, when in (
+        ("old", "reset", valid_at),
+        ("claim", "claimable", utc(2026, 10, 19, 0, 0)),
+        ("withdrawn", "reset", utc(2026, 10, 19, 1, 0)),
+        ("withdrawn", "retracted", utc(2026, 10, 19, 2, 0)),
+    ):
+        run(repo.record_logical_event(LogicalEvent(
+            logical_id=f"public:{product}:{name}", kind="public_event", group_kind="public_event",
+            state_version=state, occurred_at=when, payload={"product": product},
+        ), baseline=True))
 
-    reset = LogicalEvent(
-        logical_id="reset:abc",
-        kind="reset",
-        group_kind="reset",
-        state_version="confirmed",
-        occurred_at=utc(2026, 10, 18, 22, 15),
-        payload={},
-    )
-    run(repo.record_logical_event(reset, baseline=False))
-    data = run(pipeline.build_report_data(clock.utcnow()))
-    assert data is not None and data.last_reset_at == utc(2026, 10, 18, 22, 15)
-
-
-def test_build_report_data_watch_states(tmp_path: Path) -> None:
-    """P05：预告三态映射。"""
-    from services.models import LatestAlert
-
-    pipeline, _, _, _, clock = _make_daily_pipeline(tmp_path)
-    _seed_forecast(pipeline, clock)
-
-    snapshot = pipeline.forecast()
-    pipeline._cache["forecast"] = ForecastSnapshot(  # noqa: SLF001
-        updated_at=snapshot.updated_at,
-        rounded_24h=37,
-        rounded_48h=62,
-        confidence="medium",
-        latest_alert=LatestAlert(
-            id="a1", kind="watch", state="active", summary="s",
-        ),
-    )
-    data = run(pipeline.build_report_data(clock.utcnow()))
-    assert data is not None
-    assert data.watch_status == "watch"
-    assert data.watch_window == "暂无明确预计时段"  # 无窗口不编造小时数
-
-    pipeline._cache["forecast"] = ForecastSnapshot(  # noqa: SLF001
-        updated_at=snapshot.updated_at,
-        rounded_24h=37,
-        rounded_48h=62,
-        confidence="medium",
-        latest_alert=LatestAlert(
-            id="a2", kind="reset", state="confirmed", summary="s",
-        ),
-    )
-    data = run(pipeline.build_report_data(clock.utcnow()))
-    assert data is not None and data.watch_status == "confirmed"
-
-    pipeline._cache["forecast"] = ForecastSnapshot(  # noqa: SLF001
-        updated_at=snapshot.updated_at,
-        rounded_24h=37,
-        rounded_48h=62,
-        confidence="medium",
-        latest_alert=LatestAlert(
-            id="a3", kind="watch", state="expired", summary="s",
-        ),
-    )
-    data = run(pipeline.build_report_data(clock.utcnow()))
-    assert data is not None and data.watch_status == "none"
-
-
-def test_build_report_data_marks_stale(tmp_path: Path) -> None:
-    """P11：数据过期时 `stale=True` 且不显示自行推断的置信度。"""
-    pipeline, _, _, _, clock = _make_daily_pipeline(tmp_path)
-    _seed_forecast(pipeline, clock)
-    data = run(pipeline.build_report_data(clock.utcnow() + timedelta(hours=5)))
-    assert data is not None and data.stale is True
-    assert data.confidence == "medium"
-
-
-def test_build_report_data_uses_configured_theme(tmp_path: Path) -> None:
-    """P08：主题来自配置。"""
-    pipeline, _, _, _, clock = _make_daily_pipeline(tmp_path)
-    _seed_forecast(pipeline, clock)
-    data = run(pipeline.build_report_data(clock.utcnow(), theme="light"))
-    assert data is not None and data.theme == "light"
+    png, payload, error = run(pipeline.manual_report_png(products=(product,)))
+    assert png is not None and error is None
+    assert payload["resets"] == {product: valid_at.isoformat()}
+    assert run(pipeline.run_daily_reports(utc(2026, 10, 20, 1, 5))) == 1
+    assert "Gemini 额度：已重置 · 2026-10-19 06:15" in send.texts[0]
+    assert "agyresets.com" in send.texts[0] and "Codex" not in send.texts[0]
 
 
 # ---------------------------------------------------------------------------

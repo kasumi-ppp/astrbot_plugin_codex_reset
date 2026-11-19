@@ -24,6 +24,11 @@
     "type": "bool",
     "default": false
   },
+  "enable_gemini": {
+    "description": "启用 Google Gemini 公开额度重置监控（Antigravity 单独配置）",
+    "type": "bool",
+    "default": false
+  },
   "enable_confirmed_reset": {
     "description": "推送「全球重置已确认」通知",
     "type": "bool",
@@ -45,13 +50,13 @@
     "default": true
   },
   "enable_daily_report": {
-    "description": "每日预测图片总开关（全局默认值；各群可在 WebUI 卡片或 /cr set daily on|off 覆盖）",
+    "description": "每日重置简报总开关（全局默认值；各群可在 WebUI 卡片或 /cr set daily on|off 覆盖）",
     "type": "bool",
     "default": false,
     "hint": "升级默认关闭，避免对已有订阅群突然产生额外消息；按群开启：管理员在群内执行 /cr set daily on"
   },
   "daily_report_time": {
-    "description": "每日预测图片发送时间（HH:MM，24 小时制）",
+    "description": "每日重置简报发送时间（HH:MM，24 小时制）",
     "type": "string",
     "default": "09:00",
     "hint": "填写 HH:MM，例如 09:00、21:30；非法值回落 09:00 并告警"
@@ -63,7 +68,7 @@
     "hint": "例如 Asia/Shanghai；非法值回落 Asia/Shanghai 并告警"
   },
   "daily_report_theme": {
-    "description": "每日预测图片主题（dark=深色科技风 / light=浅色简洁风）",
+    "description": "每日重置简报主题（dark=深色科技风 / light=浅色简洁风）",
     "type": "string",
     "default": "dark",
     "hint": "仅支持 dark / light，非法值回落 dark"
@@ -224,7 +229,7 @@
             "default": true
           },
           "enable_daily_report": {
-            "description": "该群接收每日预测图片",
+            "description": "该群接收每日重置简报",
             "type": "bool",
             "default": false
           },

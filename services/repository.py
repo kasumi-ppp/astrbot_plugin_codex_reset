@@ -20,7 +20,7 @@ from typing import Any
 import aiosqlite
 
 from .clock import Clock, ensure_utc
-from .config import override_to_json, parse_override_json
+from .config import override_to_json, parse_override_json, resolve_group_settings
 from .errors import ErrorCode, PluginError, SchemaTooNewError
 from .log import logger
 from .models import (
@@ -31,10 +31,12 @@ from .models import (
     ForecastState,
     GroupOverride,
     LogicalEvent,
+    PluginSettings,
     SnapshotRow,
     SubscriptionRow,
 )
 from .notifications import event_priority_for
+from .public_messages import public_notice_enabled
 
 SCHEMA_VERSION = 3
 
@@ -812,10 +814,45 @@ class Repository:
         )
         return cursor.rowcount > 0
 
+    async def latest_confirmed_reset(
+        self, product: str, *, codex_fallback: datetime | None = None
+    ) -> datetime | None:
+        """Return the last confirmation that has not been withdrawn."""
+        if product == "codex":
+            where = "event.group_kind = 'reset' AND event.state_version = 'confirmed'"
+            withdrawn = "correction.state_version LIKE 'downgraded:%'"
+            params: tuple[str, ...] = ()
+        else:
+            where = (
+                "event.group_kind = 'public_event' AND event.logical_id LIKE ?"
+                " AND event.state_version = 'reset'"
+            )
+            withdrawn = "correction.state_version = 'retracted'"
+            params = (f"public:{product}:%",)
+        rows = await self._connection().execute_fetchall(
+            f"SELECT event.occurred_at FROM logical_events AS event WHERE {where}"
+            " AND NOT EXISTS (SELECT 1 FROM logical_events AS correction"
+            f" WHERE correction.logical_id = event.logical_id AND {withdrawn})"
+            " ORDER BY event.occurred_at DESC LIMIT 1",
+            params,
+        )
+        if rows:
+            return _parse_db_dt(rows[0][0])
+        if product == "codex" and codex_fallback is not None:
+            # The first forecast can contain a confirmed timestamp before timeline history arrives.
+            # Once a confirmation has been stored, a correction must not resurrect it via this fallback.
+            known = await self._connection().execute_fetchall(
+                "SELECT 1 FROM logical_events WHERE group_kind='reset' AND state_version='confirmed' LIMIT 1"
+            )
+            if not known:
+                return codex_fallback
+        return None
+
     async def public_product_status(self, product: str) -> dict[str, Any]:
         meta = await self.meta_get_all(f"public:{product}:")
         rows = await self._connection().execute_fetchall(
-            "SELECT * FROM logical_events WHERE logical_id LIKE ? AND state_version <> 'observed'"
+            "SELECT * FROM logical_events WHERE logical_id LIKE ?"
+            " AND state_version NOT IN ('observed','forecast')"
             " ORDER BY occurred_at DESC, rowid DESC LIMIT 1",
             (f"public:{product}:%",),
         )
@@ -827,7 +864,7 @@ class Repository:
         }
 
     async def record_public_snapshot(
-        self, product: str, events: Sequence[LogicalEvent], *, now: datetime,
+        self, product: str, events: Sequence[LogicalEvent], *, now: datetime, plugin: PluginSettings,
     ) -> tuple[bool, int]:
         now_iso = _to_iso(now)
         async with self._tx() as conn:
@@ -841,10 +878,11 @@ class Repository:
                 )
             ]
             count = 0
+            priority = {"reset": 0, "announced": 1, "watch": 1, "retracted": 1, "claimable": 2, "forecast": 3}
             for ev in events:
                 first = await self._insert_event(conn, ev, baseline_at is None, now_iso)
                 state = ev.state_version
-                if not first or baseline_at is None or state == "observed":
+                if (not first and state != "forecast") or baseline_at is None or state == "observed":
                     continue
                 if state == "retracted":
                     await conn.execute(
@@ -860,13 +898,22 @@ class Repository:
                     )
                     previous = {row[0] for row in states}
                     if "retracted" in previous or (
-                        state == "announced" and previous.intersection({"reset", "claimable"})
-                    ):
+                        state in {"announced", "watch"} and previous.intersection({"reset", "claimable"})
+                    ) or (state == "watch" and "announced" in previous):
                         continue
                     if ev.occurred_at < baseline_at and (
-                        state == "announced" or "announced" not in previous
+                        state in {"announced", "watch", "forecast"}
+                        or not previous.intersection({"watch", "announced"})
                     ):
                         continue
+                    if state in {"announced", "reset", "claimable"}:
+                        await conn.execute(
+                            "UPDATE deliveries SET status='skipped', error_code='superseded',"
+                            " updated_at=?, next_attempt_at=NULL WHERE logical_id=?"
+                            " AND (state_version='watch' OR (? AND state_version='announced'))"
+                            " AND status IN ('pending','retry')",
+                            (now_iso, ev.logical_id, state != "announced"),
+                        )
                 for sub in subs:
                     if product not in sub.products:
                         continue
@@ -881,9 +928,12 @@ class Repository:
                             continue
                     elif since is not None and ev.occurred_at < since:
                         continue
+                    settings = resolve_group_settings(plugin, sub.override)
+                    if not public_notice_enabled(settings, state, ev.payload):
+                        continue
                     if await self._insert_delivery(
                         conn, sub.subscription_id, sub.umo, ev, "pending", None,
-                        {"reset": 0, "announced": 1, "retracted": 1, "claimable": 2}[state], now_iso,
+                        priority[state], now_iso,
                     ):
                         count += 1
             if baseline_at is None:

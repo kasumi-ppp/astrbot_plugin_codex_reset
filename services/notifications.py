@@ -33,7 +33,7 @@ from .models import (
     SendFn,
 )
 from .parser import safe_url
-from .public_messages import product_enabled, render_public
+from .public_messages import product_enabled, public_notice_enabled, render_public
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查期需要，避免运行期同层循环导入
     from .repository import Repository
@@ -637,6 +637,7 @@ class DeliveryWorker:
             return False
 
         plugin = self._settings_provider()
+        settings = resolve_group_settings(plugin, sub.override)
         if task.kind == "public_event":
             product = str(task.payload.get("product", ""))
             if product not in sub.products or not product_enabled(plugin, product):
@@ -651,10 +652,17 @@ class DeliveryWorker:
             ):
                 await self._repo.mark_skipped(task, now=now, reason="upstream_retracted")
                 return False
+            if not public_notice_enabled(settings, task.state_version, task.payload):
+                await self._repo.mark_skipped(task, now=now, reason="category_disabled")
+                return False
+            expires_at = task.payload.get("expires_at")
+            if expires_at and task.state_version in {"watch", "forecast", "claimable"}:
+                if datetime.fromisoformat(expires_at) <= now:
+                    await self._repo.mark_skipped(task, now=now, reason="event_expired")
+                    return False
         elif "codex" not in sub.products:
             await self._repo.mark_skipped(task, now=now, reason="product_disabled")
             return False
-        settings = resolve_group_settings(plugin, sub.override)
         if not self._category_enabled(task.kind, settings):
             await self._repo.mark_skipped(task, now=now, reason="category_disabled")
             return False

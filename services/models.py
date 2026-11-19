@@ -341,6 +341,7 @@ class PluginSettings:
     enable_grok_bot: bool = False
     enable_grok_build: bool = False
     enable_antigravity_gemini: bool = False
+    enable_gemini: bool = False
     warnings: tuple[str, ...] = ()
 
 

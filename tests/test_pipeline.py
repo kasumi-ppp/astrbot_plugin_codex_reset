@@ -652,6 +652,7 @@ def test_command_handle_never_triggers_fetch(tmp_path: Path) -> None:
                     sender_id="42",
                     is_admin=True,
                     subcommand="status",
+                    args=("detail",),
                 )
             )
             assert reply.text

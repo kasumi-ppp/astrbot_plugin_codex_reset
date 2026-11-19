@@ -78,7 +78,7 @@ AC_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
     "AC-25": (
         ("test_daily_report", "test_daily_report_sends_once_per_group_per_day"),
         ("test_daily_report", "test_daily_reports_survive_reopen"),
-        ("test_daily_report", "test_daily_report_stale_data_is_skipped_with_error"),
+        ("test_daily_report", "test_gemini_only_daily_summary_without_forecast"),
         ("test_daily_report", "test_daily_report_text_fallback_on_image_failure"),
         ("test_daily_report", "test_daily_report_uncertain_send_never_retries_or_falls_back"),
     ),
@@ -86,7 +86,7 @@ AC_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("test_daily_report", "test_daily_report_respects_group_switch"),
         ("test_daily_report", "test_manual_report_does_not_consume_daily_quota"),
         ("test_daily_report", "test_manual_report_test_flag_is_labelled"),
-        ("test_daily_report", "test_manual_report_without_snapshot_returns_none"),
+        ("test_daily_report", "test_manual_report_without_snapshot_shows_no_confirmation"),
         ("test_commands", "test_report_command_sends_image_and_never_fetches"),
         ("test_commands", "test_set_daily_switch_writes_override"),
     ),
