@@ -7,27 +7,32 @@
   "enable_claude": {
     "description": "启用 Claude / Claude Code 公开额度事件监控",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "此处控制全局采集。订阅推送请由管理员在目标 QQ 群执行 /cr subscribe claude"
   },
   "enable_grok_bot": {
     "description": "启用 Grok Bot 公开额度事件监控",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "此处控制全局采集。订阅推送请由管理员在目标 QQ 群执行 /cr subscribe grok-bot"
   },
   "enable_grok_build": {
     "description": "启用 Grok Build 公开额度事件监控",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "此处控制全局采集。订阅推送请由管理员在目标 QQ 群执行 /cr subscribe grok-build"
   },
   "enable_antigravity_gemini": {
     "description": "启用 Antigravity Gemini 公开额度事件监控",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "此处控制全局采集。订阅推送请由管理员在目标 QQ 群执行 /cr subscribe antigravity-gemini"
   },
   "enable_gemini": {
     "description": "启用 Google Gemini 公开额度重置监控（Antigravity 单独配置）",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "此处控制全局采集。订阅推送请由管理员在目标 QQ 群执行 /cr subscribe gemini"
   },
   "enable_confirmed_reset": {
     "description": "推送「全球重置已确认」通知",
@@ -181,10 +186,10 @@
     "default": true
   },
   "group_overrides": {
-    "description": "群级通知配置（由 /cr subscribe 与 /cr set 自动维护，请勿手工新增条目）",
+    "description": "群级订阅与通知配置",
     "type": "template_list",
     "default": [],
-    "hint": "修改后会在插件下次启动时同步进数据库；数据库始终是唯一真源",
+    "hint": "在已有群卡片上选择订阅产品，保存后自动同步。新群请先在目标群执行 /cr subscribe",
     "templates": {
       "group_card": {
         "name": "群配置",
@@ -207,6 +212,42 @@
             "type": "int",
             "default": 1,
             "invisible": true
+          },
+          "_products_ready": {
+            "description": "产品选择已从数据库同步",
+            "type": "bool",
+            "default": false,
+            "invisible": true
+          },
+          "subscribe_codex": {
+            "description": "订阅 Codex 额度通知",
+            "type": "bool",
+            "default": false
+          },
+          "subscribe_claude": {
+            "description": "订阅 Claude / Claude Code 额度通知",
+            "type": "bool",
+            "default": false
+          },
+          "subscribe_grok_bot": {
+            "description": "订阅 Grok Bot 额度通知",
+            "type": "bool",
+            "default": false
+          },
+          "subscribe_grok_build": {
+            "description": "订阅 Grok Build 额度通知",
+            "type": "bool",
+            "default": false
+          },
+          "subscribe_antigravity_gemini": {
+            "description": "订阅 Antigravity Gemini 额度通知",
+            "type": "bool",
+            "default": false
+          },
+          "subscribe_gemini": {
+            "description": "订阅 Google Gemini 额度通知",
+            "type": "bool",
+            "default": false
           },
           "enable_confirmed_reset": {
             "description": "该群接收「重置已确认」",

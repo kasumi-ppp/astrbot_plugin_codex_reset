@@ -58,6 +58,13 @@ OVERRIDE_CARD_FIELDS: tuple[str, ...] = (
     "subscription_id",
     "group_name",
     "_version",
+    "_products_ready",
+    "subscribe_codex",
+    "subscribe_claude",
+    "subscribe_grok_bot",
+    "subscribe_grok_build",
+    "subscribe_antigravity_gemini",
+    "subscribe_gemini",
     "enable_confirmed_reset",
     "enable_watch",
     "enable_forecast",
@@ -140,9 +147,12 @@ def test_schema_group_overrides_template_list_structure() -> None:
     assert card["display_item"] == "group_name"
     items = card["items"]
     assert set(items) == set(OVERRIDE_CARD_FIELDS)
-    for hidden in ("subscription_id", "group_name", "_version"):
+    for hidden in ("subscription_id", "group_name", "_version", "_products_ready"):
         assert items[hidden]["invisible"] is True, hidden
     assert items["_version"]["type"] == "int"
+    assert items["_products_ready"]["default"] is False
+    for name in (name for name in OVERRIDE_CARD_FIELDS if name.startswith("subscribe_")):
+        assert items[name]["type"] == "bool" and items[name]["default"] is False
     for name in (
         "enable_confirmed_reset", "enable_watch", "enable_forecast", "enable_credits", "enable_daily_report"
     ):
@@ -171,7 +181,7 @@ def test_metadata_yaml_is_parseable_and_correct() -> None:
     metadata = _parse_metadata((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_codex_reset"
     assert metadata["display_name"] == "AI 额度雷达"
-    assert metadata["version"] == "v1.7.0"
+    assert metadata["version"] == "v1.7.1"
     assert metadata["author"] == "kasumi-ppp"
     assert metadata["repo"] == "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
     assert metadata["astrbot_version"] == ">=4.16,<5"
@@ -187,7 +197,7 @@ def test_main_py_compiles_and_declares_plugin() -> None:
     compile(source, "main.py", "exec")  # 语法错误会直接抛
     assert '@register(\n    PLUGIN_NAME,' in source or '@register(PLUGIN_NAME' in source
     assert 'PLUGIN_NAME = "astrbot_plugin_codex_reset"' in source
-    assert 'PLUGIN_VERSION = "1.7.0"' in source
+    assert 'PLUGIN_VERSION = "1.7.1"' in source
     assert "from .services.log import set_logger as set_service_logger" in source
     assert "set_service_logger(logger)" in source
     # 单指令 + GreedyStr 手工分派（不用 command_group）

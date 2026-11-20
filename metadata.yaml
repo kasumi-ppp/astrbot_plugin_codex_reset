@@ -2,7 +2,7 @@ name: astrbot_plugin_codex_reset
 display_name: AI 额度雷达
 desc: 监控 Codex、Claude、Grok 和 Gemini 的公开额度重置，按产品向订阅的 QQ 群推送预警与确认，支持精简日报。
 short_desc: 多模型额度重置预警与群日报
-version: v1.7.0
+version: v1.7.1
 author: kasumi-ppp
 repo: https://github.com/kasumi-ppp/astrbot_plugin_codex_reset
 astrbot_version: ">=4.16,<5"

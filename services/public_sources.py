@@ -34,7 +34,7 @@ SOURCE_ENDPOINTS = {
     "agy": ("https://www.agyresets.com/api/v1/resets", "https://www.agyresets.com/api/v1/status"),
 }
 _MAX_BYTES = 1_000_000
-_UA = "AstrBot Codex Reset Radar/1.7.0 (+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)"
+_UA = "AstrBot Codex Reset Radar/1.7.1 (+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)"
 
 
 @dataclass(frozen=True, slots=True)

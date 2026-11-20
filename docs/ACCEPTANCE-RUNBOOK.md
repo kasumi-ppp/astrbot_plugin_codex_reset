@@ -1,4 +1,4 @@
-# 验收执行单（Runbook）· AI 额度雷达 V1.7.0
+# 验收执行单（Runbook）· AI 额度雷达 V1.7.1
 
 > `docs/ACCEPTANCE.md` 是**覆盖矩阵**（有没有覆盖）；本文是**执行手册**（今天怎么敲、看到什么算过）。
 > 二者不重复：本文不重抄 AC-01~24 场景，只给可粘贴命令、**逐字**期望文案与判定口径。
@@ -427,7 +427,7 @@ endpoints = {
     "agy-status": "https://www.agyresets.com/api/v1/status",
 }
 headers = {
-    "User-Agent": "AstrBot Codex Reset Radar/1.7.0 "
+    "User-Agent": "AstrBot Codex Reset Radar/1.7.1 "
                   "(+https://github.com/kasumi-ppp/astrbot_plugin_codex_reset)",
     "Accept": "application/json",
     "Accept-Encoding": "identity",
@@ -468,7 +468,7 @@ docker exec -i astrbot python3 - <<'PY'
 import sqlite3
 from pathlib import Path
 src = Path('/AstrBot/data/plugin_data/astrbot_plugin_codex_reset/codex_reset.db')
-dst = src.with_name('codex_reset.pre-v1.7.0.backup.db')
+dst = src.with_name('codex_reset.pre-v1.7.1.backup.db')
 with sqlite3.connect(f'file:{src}?mode=ro', uri=True) as source, sqlite3.connect(dst) as backup:
     source.backup(backup)
     result = backup.execute('PRAGMA integrity_check').fetchone()[0]

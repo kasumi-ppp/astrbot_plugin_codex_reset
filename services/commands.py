@@ -7,7 +7,7 @@
   WebUI 卡片只是同步出口，写入一律走 `GroupConfigSink`。
 
 文案全部为中文纯文本，单条 ≤1200 字符，且每条都带
-`数据来源：https://codex-reset.com/`（AC-20；`/cr test` 由模板自带）。
+数据来源署名（AC-20；`/cr test` 由模板自带，单产品订阅使用对应来源）。
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from .notifications import (
     format_time,
     render_test,
 )
-from .public_messages import PRODUCT_LABELS, PUBLIC_STATE_LABELS, product_enabled, render_public
+from .public_messages import ORIGINS, PRODUCT_LABELS, PUBLIC_STATE_LABELS, product_enabled, render_public
 from .reset_summary import NO_SUBSCRIPTION_TEXT, read_reset_summary, render_reset_summary_text
 
 #: `(umo, 子命令)` 维度的限频秒数（PRD §4 冻结）
@@ -311,7 +311,11 @@ class CommandService:
             return await self._test(req, plugin, tz)
         else:  # 理论不可达：`RATE_LIMITS` 与上方分支一一对应
             text = HELP_TEXT
-        return CommandReply(text=self._finalize(text))
+        source_line = SOURCE_LINE
+        if sub in {"subscribe", "unsubscribe"} and len(req.args) == 1:
+            if origin := ORIGINS.get(req.args[0].lower()):
+                source_line = f"数据来源：{origin}"
+        return CommandReply(text=self._finalize(text, source_line=source_line))
 
     # ------------------------------------------------------------------
     # 限频
@@ -673,7 +677,7 @@ class CommandService:
         if result == "unchanged":
             return f"本群已订阅 {PRODUCT_LABELS[product]}。"
         assert row is not None
-        synced = await self._sync_sink(row) if row.enabled else await self._drop_sink(row.subscription_id)
+        synced = await self._sync_sink(row)
         action_name = "subscribe" if subscribe else "unsubscribe"
         await self._audit(req, f"{action_name}:{product}" if req.args else action_name, "ok")
         if subscribe and product == "codex":
@@ -966,12 +970,12 @@ class CommandService:
         when = format_time(latest, tz, with_zone=False) if latest is not None else "未知"
         return f"⚠️ 数据可能已过时（最近采集：{when}）。"
 
-    def _finalize(self, text: str) -> str:
+    def _finalize(self, text: str, *, source_line: str = SOURCE_LINE) -> str:
         """统一追加署名行并按 U-4 截断到 1200 字符。"""
         body = (text or "").rstrip()
         if not body:
             return body
-        combined = body if SOURCE_LINE in body else f"{body}\n\n{SOURCE_LINE}"
+        combined = body if source_line in body else f"{body}\n\n{source_line}"
         if len(combined) <= MAX_MESSAGE_CHARS:
             return combined
         keep = MAX_MESSAGE_CHARS - len(TRUNCATED_SUFFIX)

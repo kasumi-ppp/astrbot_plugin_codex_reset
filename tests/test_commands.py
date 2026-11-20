@@ -501,6 +501,29 @@ def test_subscribe_from_private_chat_is_rejected(tmp_path: Path) -> None:
     run(scenario())
 
 
+def test_product_subscription_reply_credits_the_product_source(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _clock, repo, _bundle, _sink, service = await _boot(tmp_path)
+        try:
+            request = _request("subscribe", ("antigravity-gemini",))
+            reply = await service.handle(request)
+            assert "订阅成功" in reply.text
+            assert "数据来源：https://www.agyresets.com/" in reply.text
+            assert "codex-reset.com" not in reply.text
+
+            row = await repo.get_subscription(request.umo)
+            assert row is not None
+            assert row.products == ("antigravity-gemini",)
+
+            reply = await service.handle(_request("unsubscribe", ("antigravity-gemini",)))
+            assert "已取消订阅" in reply.text
+            assert "数据来源：https://www.agyresets.com/" in reply.text
+        finally:
+            await repo.close()
+
+    run(scenario())
+
+
 def test_subscribe_again_echoes_existing_settings(tmp_path: Path) -> None:
     async def scenario() -> None:
         clock, repo, _bundle, sink, service = await _boot(tmp_path)

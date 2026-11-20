@@ -606,13 +606,26 @@ class Repository:
             logger.info("[codex-reset][repo] subscription deleted umo_hash=%s", _hash_umo(umo))
         return deleted
 
-    async def update_subscription_override(self, umo: str, override: GroupOverride) -> bool:
+    async def update_subscription_override(
+        self, umo: str, override: GroupOverride, *, products: set[str] | None = None,
+        expected_version: int | None = None, group_limit: int = 0,
+    ) -> bool:
         """更新某群的**稀疏**覆盖（`/cr set` 与 WebUI 卡片的唯一写入口）。"""
         async with self._tx() as conn:
-            async with conn.execute("SELECT settings_json FROM subscriptions WHERE umo=?", (umo,)) as result:
+            async with conn.execute("SELECT * FROM subscriptions WHERE umo=?", (umo,)) as result:
                 raw = await result.fetchone()
-            previous = self._subscription_json(raw["settings_json"]) if raw is not None else {}
+            if raw is None or expected_version is not None and raw["version"] != expected_version:
+                return False
+            previous = self._subscription_json(raw["settings_json"])
             merged = self._subscription_json(override_to_json(override))
+            if products is not None:
+                row = self._subscription_from_row(raw)
+                if products and not row.enabled and not await self._has_subscription_space(conn, group_limit):
+                    return False
+                await self._write_product_selection(
+                    conn, row, merged, products, _to_iso(self._clock.utcnow()),
+                )
+                return True
             merged.update({key: previous[key] for key in ("products", "product_since") if key in previous})
             cursor = await conn.execute(
                 "UPDATE subscriptions SET settings_json=?, updated_at=?, version=version + 1"
@@ -695,9 +708,7 @@ class Repository:
             if raw is None:
                 if not subscribe:
                     return "missing", None
-                async with conn.execute("SELECT COUNT(*) FROM subscriptions WHERE enabled=1") as cursor:
-                    count = await cursor.fetchone()
-                if count[0] >= group_limit:
+                if not await self._has_subscription_space(conn, group_limit):
                     return "limit", None
                 await conn.execute(
                     "INSERT INTO subscriptions (subscription_id, umo, platform, group_id, group_name,"
@@ -711,40 +722,48 @@ class Repository:
                     return "unchanged", row
                 settings = self._subscription_json(raw["settings_json"])
                 products = set(row.products)
-                since = {key: _to_iso(dt) for key, dt in row.product_since.items()}
                 if subscribe:
-                    if not row.enabled:
-                        async with conn.execute(
-                            "SELECT COUNT(*) FROM subscriptions WHERE enabled=1"
-                        ) as cursor:
-                            count = await cursor.fetchone()
-                        if count[0] >= group_limit:
-                            return "limit", None
+                    if not row.enabled and not await self._has_subscription_space(conn, group_limit):
+                        return "limit", None
                     products.add(product)
-                    since[product] = now
                 else:
                     products.remove(product)
-                    since.pop(product, None)
-                    predicate = "kind != 'public_event'" if product == "codex" else (
-                        "kind = 'public_event' AND json_extract(payload_json, '$.product') = ?"
-                    )
-                    await conn.execute(
-                        "UPDATE deliveries SET status='skipped', error_code='product_unsubscribed',"
-                        " updated_at=?, next_attempt_at=NULL WHERE subscription_id=?"
-                        " AND status IN ('pending','retry')"
-                        f" AND {predicate}",
-                        (now, row.subscription_id) if product == "codex"
-                        else (now, row.subscription_id, product),
-                    )
-                settings.update(products=sorted(products), product_since=since)
-                await conn.execute(
-                    "UPDATE subscriptions SET settings_json=?, enabled=?, updated_at=?, version=version+1"
-                    " WHERE umo=?",
-                    (json.dumps(settings, ensure_ascii=False), bool(products), now, umo),
-                )
+                await self._write_product_selection(conn, row, settings, products, now)
             async with conn.execute("SELECT * FROM subscriptions WHERE umo=?", (umo,)) as cursor:
                 raw = await cursor.fetchone()
             return "changed", self._subscription_from_row(raw)
+
+    @staticmethod
+    async def _has_subscription_space(conn: aiosqlite.Connection, group_limit: int) -> bool:
+        async with conn.execute("SELECT COUNT(*) FROM subscriptions WHERE enabled=1") as cursor:
+            count = await cursor.fetchone()
+        return count[0] < group_limit
+
+    @staticmethod
+    async def _write_product_selection(
+        conn: aiosqlite.Connection, row: SubscriptionRow, settings: dict[str, Any],
+        products: set[str], now: str,
+    ) -> None:
+        """保存产品变化和取消待投递任务，调用方持有写事务。"""
+        since = {key: _to_iso(dt) for key, dt in row.product_since.items() if key in products}
+        since.update(dict.fromkeys(products.difference(row.products), now))
+        for product in set(row.products) - products:
+            predicate = "kind != 'public_event'" if product == "codex" else (
+                "kind = 'public_event' AND json_extract(payload_json, '$.product') = ?"
+            )
+            await conn.execute(
+                "UPDATE deliveries SET status='skipped', error_code='product_unsubscribed',"
+                " updated_at=?, next_attempt_at=NULL WHERE subscription_id=?"
+                " AND status IN ('pending','retry')"
+                f" AND {predicate}",
+                (now, row.subscription_id) if product == "codex" else (now, row.subscription_id, product),
+            )
+        settings.update(products=sorted(products), product_since=since)
+        await conn.execute(
+            "UPDATE subscriptions SET settings_json=?, enabled=?, updated_at=?, version=version+1"
+            " WHERE umo=?",
+            (json.dumps(settings, ensure_ascii=False), bool(products), now, row.umo),
+        )
 
     def _subscription_from_row(self, row: aiosqlite.Row) -> SubscriptionRow:
         settings = self._subscription_json(row["settings_json"])

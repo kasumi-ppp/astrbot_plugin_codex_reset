@@ -46,6 +46,7 @@ if __package__:
     from .services.models import CommandRequest, PluginSettings, SubscriptionRow
     from .services.notifications import DeliveryWorker
     from .services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
+    from .services.public_messages import PRODUCT_LABELS
     from .services.public_monitor import PublicMonitor
     from .services.public_sources import PublicSourceClient
     from .services.repository import Repository
@@ -66,6 +67,7 @@ else:  # 独立测试入口；AstrBot 按包加载时必须使用上面的相对
     from services.models import CommandRequest, PluginSettings, SubscriptionRow
     from services.notifications import DeliveryWorker
     from services.pipeline import NullPipelineHooks, Pipeline, PipelineHooks
+    from services.public_messages import PRODUCT_LABELS
     from services.public_monitor import PublicMonitor
     from services.public_sources import PublicSourceClient
     from services.repository import Repository
@@ -94,10 +96,11 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_codex_reset"
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.7.1"
 PLUGIN_AUTHOR = "kasumi-ppp"
 PLUGIN_REPO = "https://github.com/kasumi-ppp/astrbot_plugin_codex_reset"
 PLUGIN_DESC = "向订阅群推送 Codex、Claude、Grok 和 Gemini 的公开额度预警、确认与日报"
+PRODUCT_CARD_FIELDS = {f"subscribe_{key.replace('-', '_')}": key for key in PRODUCT_LABELS}
 
 DB_FILENAME = "codex_reset.db"
 AUDIT_DIRNAME = "audit"
@@ -698,7 +701,7 @@ class CodexResetRadar(Star):
         self._config_digest = digest
 
         try:
-            data = json.loads(raw_bytes.decode("utf-8"))
+            data = json.loads(raw_bytes.decode("utf-8-sig"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             logger.warning("[codex-reset][main] 配置文件不是合法 JSON，忽略本次热更新")
             return
@@ -1010,6 +1013,15 @@ class CodexResetRadar(Star):
     # ------------------------------------------------------------------
     async def sync_group(self, sub: SubscriptionRow) -> bool:
         """把订阅的稀疏覆盖写成 `group_overrides` 卡片（DB 为真源）。"""
+        card = self._subscription_card(sub)
+        cards = self._config_cards()
+        cards = [item for item in cards if item.get("subscription_id") != sub.subscription_id]
+        cards.append(card)
+        self._set_config("group_overrides", cards)
+        self.save_config()
+        return True
+
+    def _subscription_card(self, sub: SubscriptionRow) -> dict[str, object]:
         card = override_to_card(
             sub.override,
             self._plugin_settings,
@@ -1017,12 +1029,9 @@ class CodexResetRadar(Star):
             group_name=sub.group_name or f"群 {sub.group_id}",
         )
         card["_version"] = int(sub.version)
-        cards = self._config_cards()
-        cards = [item for item in cards if item.get("subscription_id") != sub.subscription_id]
-        cards.append(card)
-        self._set_config("group_overrides", cards)
-        self.save_config()
-        return True
+        card["_products_ready"] = True
+        card.update({field: product in sub.products for field, product in PRODUCT_CARD_FIELDS.items()})
+        return card
 
     async def drop_group(self, subscription_id: str) -> bool:
         """删除某订阅对应的卡片。"""
@@ -1042,7 +1051,7 @@ class CodexResetRadar(Star):
         → 再与 DB version 比对」。旧实现把「重复 id」判定放在版本判定之前，于是一张过期卡
         会占住 `seen`，把同组里更新的卡当成重复丢弃 —— 这一轮任何覆盖都不生效。
         """
-        if self._readonly:
+        if self._readonly or self._repo is None:
             return
         grouped: dict[str, list[dict[str, Any]]] = {}
         for card in self._config_cards():
@@ -1061,7 +1070,7 @@ class CodexResetRadar(Star):
                 )
             card = max(group, key=_card_version)
             card_version = _card_version(card)
-            row = await self._repo.get_subscription_by_id(subscription_id) if self._repo else None
+            row = await self._repo.get_subscription_by_id(subscription_id)
             if row is None:
                 logger.warning(
                     "[codex-reset][main] 卡片对应订阅不存在 sub_id=%s，已丢弃", subscription_id
@@ -1076,13 +1085,26 @@ class CodexResetRadar(Star):
                 )
                 continue
             override = override_from_card(card, self._plugin_settings)
-            if override.as_sparse_dict() != row.override.as_sparse_dict():
-                await self._repo.update_subscription_override(row.umo, override)
-                logger.info(
-                    "[codex-reset][main] 卡片覆盖写回 DB sub_id=%s fields=%s",
-                    subscription_id,
-                    sorted(override.as_sparse_dict()),
+            products = None
+            if (
+                row.platform == "aiocqhttp" and row.group_id
+                and card.get("_products_ready") is True
+                and all(type(card.get(field)) is bool for field in PRODUCT_CARD_FIELDS)
+            ):
+                selected = {product for field, product in PRODUCT_CARD_FIELDS.items() if card[field]}
+                if selected != set(row.products):
+                    products = selected
+            if products is not None or override.as_sparse_dict() != row.override.as_sparse_dict():
+                applied = await self._repo.update_subscription_override(
+                    row.umo, override, products=products, expected_version=row.version,
+                    group_limit=self._plugin_settings.group_limit,
                 )
+                if not applied:
+                    logger.warning(
+                        "[codex-reset][main] 群卡片保存冲突或达到群上限 sub_id=%s", subscription_id,
+                    )
+                else:
+                    logger.info("[codex-reset][main] 群卡片已写回 DB sub_id=%s", subscription_id)
         await self._project_cards()
 
     async def _project_cards(self) -> None:
@@ -1090,19 +1112,7 @@ class CodexResetRadar(Star):
         if self._readonly or self._repo is None:
             return
         rows = await self._repo.list_subscriptions()
-        cards: list[dict[str, Any]] = []
-        for row in rows:
-            if not row.enabled:
-                continue
-            card = override_to_card(
-                row.override,
-                self._plugin_settings,
-                subscription_id=row.subscription_id,
-                group_name=row.group_name or f"群 {row.group_id}",
-            )
-            card["_version"] = int(row.version)
-            cards.append(card)
-        self._set_config("group_overrides", cards)
+        self._set_config("group_overrides", [self._subscription_card(row) for row in rows])
         self.save_config()
 
     def _config_cards(self) -> list[dict[str, Any]]:

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+
 # ruff: noqa: I001 - conftest 属于测试基础设施，与 services 分块导入
 import ast
 import asyncio
@@ -562,6 +564,59 @@ def test_send_maps_errors_and_reraises_timeout(tmp_path, monkeypatch):
         return soft
 
     assert run(scenario()) is False
+
+
+def test_group_card_product_selection_round_trips(tmp_path, monkeypatch):
+    main = _load_main(monkeypatch, tmp_path / "data")
+
+    async def scenario():
+        plugin = main.CodexResetRadar(FakeContext(), {"enable_monitor": False})
+        await plugin.initialize()
+        try:
+            repo = plugin.repo
+            row = await repo.upsert_subscription(
+                umo=UMO, platform="aiocqhttp", group_id="1001", group_name="测试群", override=None,
+            )
+            _, row = await repo.change_product_subscription(
+                umo=UMO, platform="aiocqhttp", group_id="1001", group_name="测试群",
+                product="claude", subscribe=True, group_limit=5,
+            )
+            initial_since = row.product_since["claude"]
+            # A schema-normalized legacy card can have new controls populated with defaults.
+            plugin.config["group_overrides"] = [{
+                "subscription_id": row.subscription_id, "_version": row.version,
+                "_products_ready": False, "subscribe_codex": True, "subscribe_claude": False,
+            }]
+            await plugin._apply_config_cards()
+            card, = plugin.config["group_overrides"]
+            assert card["subscribe_claude"] is True
+            assert card["subscribe_codex"] is True
+            assert card["subscribe_gemini"] is False
+
+            card["subscribe_gemini"] = True
+            config_path = plugin._config_path()
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(plugin.config), encoding="utf-8-sig")
+            await plugin._reload_config_if_changed()
+            row = await repo.get_subscription(UMO)
+            assert set(row.products) == {"claude", "codex", "gemini"}
+            assert row.product_since["claude"] == initial_since
+            assert row.product_since["gemini"] is not None
+
+            card, = plugin.config["group_overrides"]
+            card.update(subscribe_claude=False, subscribe_codex=False, subscribe_gemini=False)
+            await plugin._apply_config_cards()
+            row = await repo.get_subscription(UMO)
+            assert not row.enabled and not row.products
+            card, = plugin.config["group_overrides"]
+            card["subscribe_grok_bot"] = True
+            await plugin._apply_config_cards()
+            row = await repo.get_subscription(UMO)
+            assert row.enabled and row.products == ("grok-bot",)
+        finally:
+            await plugin.terminate()
+
+    run(scenario())
 
 
 def test_apply_config_cards_handles_stale_unknown_and_duplicate(tmp_path, monkeypatch):

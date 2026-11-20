@@ -2,7 +2,7 @@
 
 **把 AI 额度重置公告推送到 QQ 群。** 群管理员可以按产品订阅，通知附带适用范围和来源链接。
 
-`v1.7.0` · AstrBot `>=4.16,<5` · Python `>=3.12` · QQ 适配器 `aiocqhttp`（OneBot v11）
+`v1.7.1` · AstrBot `>=4.16,<5` · Python `>=3.12` · QQ 适配器 `aiocqhttp`（OneBot v11）
 
 ## 能监控什么
 
@@ -29,6 +29,8 @@
    /cr test claude
    ```
 
+已有群可在 WebUI 的「群级订阅与通知配置」选择任意产品，保存后同步到群订阅。全部关闭会暂停该群推送并保留卡片。新群先执行 `/cr subscribe` 建立卡片。
+
 群内 `/cr` 和 `/cr status` 只列出本群已订阅的产品，每个产品显示最近一次已确认重置（北京时间）或「暂无确认记录」。`/cr status detail` 可查看采集和最新事件，私聊状态列出全部产品。`/cr test antigravity-gemini watch` 可试发预警。测试消息用于确认 QQ 发送通道。连续测试请间隔至少 60 秒。
 
 | 常用命令 | 用途 |
@@ -44,6 +46,8 @@
 
 ## 数据来源与帮助
 
-- 数据来自第三方公开站点，通知附带来源。Codex 概率为实验性估计。[Codex Reset](https://codex-reset.com/) · [Claude Reset](https://claudereset.org/) · [QuotaResets](https://quotaresets.com/) · [AGY Resets](https://www.agyresets.com/)
+- Codex 读取 [Codex Reset](https://codex-reset.com/)。Claude 读取 [Claude Reset](https://claudereset.org/developers/)，其中概率来自 WhenReset 的估算。
+- Grok Bot、Grok Build 和 Google Gemini 读取 [QuotaResets](https://quotaresets.com/api/v1/events.json)。Antigravity Gemini 读取 [AGY Resets](https://agyresets.com/api/docs)，覆盖 Antigravity 内的额度公告。
+- 这些站点整理公开消息，覆盖率取决于上游收录。事件通知附数据来源与原帖链接，概率和预警均为未确认信号。
 - Docker 部署请持久化 AstrBot 的 `data/` 目录，以保留订阅和去重记录。遇到 HTTP 403、采集失败或群内收不到消息，可按手册逐项检查。[服务器验收与排障](docs/ACCEPTANCE-RUNBOOK.md)
 - [进阶用法](docs/usage-notes.md) · [版本记录](CHANGELOG.md) · [AGPL-3.0 许可证](LICENSE)
